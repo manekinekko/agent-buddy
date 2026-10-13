@@ -27,6 +27,10 @@ inline DisplayPanel& displayPanel() {
   return panel;
 }
 
+inline Arduino_DataBus* displayWriteBus() {
+  return &displayBus();
+}
+
 // The QMI8658 axes are already the orientation frame (see ScreenOrientation.h), so read() needs
 // no axis change on this board. The IMU starts after touch, then sets the shared bus clock.
 inline Qmi8658Accelerometer& accelerometer() {

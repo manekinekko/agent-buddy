@@ -3,6 +3,8 @@
 #include "BoardConfig.h"
 #if defined(AGENT_BOARD_WAVESHARE_AMOLED_175)
 #include "waveshare_amoled_175/BoardDrivers.h"
+#elif defined(AGENT_BOARD_WAVESHARE_P4_86)
+#include "waveshare_p4_86/BoardDrivers.h"
 #else  // The default board in firmware/boards.json.
 #include "waveshare_amoled_175/BoardDrivers.h"
 #endif

@@ -1,5 +1,6 @@
 {
   "default": "waveshare-amoled-175",
+  "arduino_core": "3.3.12",
   "boards": {
     "waveshare-amoled-175": {
       "name": "Waveshare ESP32-S3-Touch-AMOLED-1.75",
@@ -8,6 +9,12 @@
       "directory": "waveshare_amoled_175",
       "chip": "esp32s3",
       "flash_size": "16MB",
+      "partitions": "firmware/AgentCompanion/partitions.csv",
+      "flash": {
+        "bootloader_offset": "0x0",
+        "partitions_offset": "0x8000",
+        "boot_app0_offset": "0xe000"
+      },
       "fqbn": "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,PSRAM=opi,LoopCore=1,EventsCore=1,DebugLevel=error",
       "vendor": {
         "repository": "https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-1.75.git",
@@ -21,6 +28,35 @@
         "required_files": {
           "examples/arduino/libraries/GFX_Library_for_Arduino/src/display/Arduino_CO5300.cpp": "Waveshare's CO5300-capable GFX library",
           "examples/arduino/libraries/SensorLib/src/touch/TouchDrvCST92xx.h": "Waveshare's CST9217 SensorLib"
+        }
+      }
+    },
+    "waveshare-p4-86": {
+      "name": "Waveshare ESP32-P4 86 Panel",
+      "models": "Waveshare ESP32-P4-WIFI6-Touch-LCD-4B with 86-panel bottom board",
+      "define": "AGENT_BOARD_WAVESHARE_P4_86",
+      "directory": "waveshare_p4_86",
+      "chip": "esp32p4",
+      "flash_size": "32MB",
+      "partitions": "firmware/AgentCompanion/partitions-waveshare-p4-86.csv",
+      "flash": {
+        "bootloader_offset": "0x2000",
+        "partitions_offset": "0x8000",
+        "boot_app0_offset": "0xe000"
+      },
+      "fqbn": "esp32:esp32:esp32p4:ChipVariant=prev3,PSRAM=enabled,FlashSize=32M,FlashMode=qio,FlashFreq=80,PartitionScheme=custom,USBMode=default,CDCOnBoot=default,UploadMode=default,DebugLevel=error",
+      "vendor": {
+        "repository": "https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-4B.git",
+        "revision": "5a7a9a2823d77983c15b44a72934a7699e5d2d8b",
+        "directory_env": "WAVESHARE_P4_DIR",
+        "default_directory": "~/Documents/Arduino/ESP32-P4-WIFI6-Touch-LCD-4B",
+        "libraries": [
+          "examples/arduino/libraries/GFX_Library_for_Arduino",
+          "examples/arduino/libraries/displays"
+        ],
+        "required_files": {
+          "examples/arduino/libraries/GFX_Library_for_Arduino/src/display/Arduino_DSI_Display.cpp": "Waveshare's ESP32-P4 DSI GFX library",
+          "examples/arduino/libraries/displays/displays_config.h": "Waveshare's ST7703 panel configuration"
         }
       }
     }

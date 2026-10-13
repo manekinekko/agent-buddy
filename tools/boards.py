@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -18,7 +19,9 @@ BOARD_SOURCES = ROOT / "firmware" / "AgentCompanion" / "src" / "boards"
 SELECTORS = ("BoardConfig.h", "BoardDrivers.h")
 BOARD_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DEFINE = re.compile(r"^AGENT_BOARD_[A-Z0-9_]+$")
-REQUIRED = ("name", "define", "directory", "chip", "flash_size", "fqbn", "vendor")
+VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+REQUIRED = ("name", "define", "directory", "chip", "flash_size", "partitions",
+            "flash", "fqbn", "vendor")
 
 
 def load(path=BOARDS):
@@ -27,12 +30,14 @@ def load(path=BOARDS):
     return data
 
 
-def validate(data, sources=BOARD_SOURCES):
+def validate(data, sources=BOARD_SOURCES, root=ROOT):
     boards = data.get("boards")
     if not isinstance(boards, dict) or not boards:
         raise ValueError("boards.json must list one or more boards.")
     if data.get("default") not in boards:
         raise ValueError("boards.json default must name a listed board.")
+    if not VERSION.match(str(data.get("arduino_core", ""))):
+        raise ValueError("boards.json arduino_core must be a pinned semantic version.")
     defines = set()
     for board_id, board in boards.items():
         if not BOARD_ID.match(board_id):
@@ -43,6 +48,27 @@ def validate(data, sources=BOARD_SOURCES):
         if not DEFINE.match(board["define"]) or board["define"] in defines:
             raise ValueError(f"Board {board_id} needs a unique AGENT_BOARD_* define.")
         defines.add(board["define"])
+        if not isinstance(board["partitions"], str):
+            raise ValueError(f"Board {board_id} partitions must be a repository-relative path.")
+        partition = Path(board["partitions"])
+        partition_path = (root / partition).resolve()
+        if (partition.is_absolute() or not partition_path.is_relative_to(root.resolve())
+                or not partition_path.is_file()):
+            raise ValueError(f"Board {board_id} partition table does not exist: {partition_path}.")
+        if (not isinstance(board["flash_size"], str)
+                or not re.fullmatch(r"[1-9][0-9]*MB", board["flash_size"])):
+            raise ValueError(f"Board {board_id} flash_size must be expressed in MB.")
+        flash = board["flash"]
+        try:
+            offsets = [int(flash[key], 0) for key in
+                       ("bootloader_offset", "partitions_offset", "boot_app0_offset")]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Board {board_id} has invalid flash image offsets.") from error
+        if not 0 <= offsets[0] < offsets[1] < offsets[2] < 0x10000:
+            raise ValueError(f"Board {board_id} flash image offsets are unsafe.")
+        if (not isinstance(board["directory"], str)
+                or Path(board["directory"]).name != board["directory"]):
+            raise ValueError(f"Board {board_id} directory must be one folder name.")
         directory = sources / board["directory"]
         for header in SELECTORS:
             if not (directory / header).is_file():
@@ -68,7 +94,9 @@ def board(data, board_id=None):
 
 def vendor_directory(entry):
     vendor = entry["vendor"]
-    return Path(os.path.expanduser(os.environ.get(vendor["directory_env"]) or vendor["default_directory"]))
+    return Path(os.path.expanduser(
+        os.environ.get("VENDOR_DIR") or os.environ.get(vendor["directory_env"])
+        or vendor["default_directory"]))
 
 
 def fetch_vendor(entry, destination):
@@ -83,14 +111,27 @@ def fetch_vendor(entry, destination):
     subprocess.run(["git", "-C", str(destination), "checkout", "--detach", vendor["revision"]], check=True)
 
 
+def prepare_sketch(entry, destination):
+    destination = Path(destination).resolve()
+    build = (ROOT / "build").resolve()
+    if not destination.is_relative_to(build) or destination == build:
+        raise ValueError("Generated sketches must be placed below build/.")
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(ROOT / "firmware/AgentCompanion", destination)
+    shutil.copy2(ROOT / entry["partitions"], destination / "partitions.csv")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="print the board IDs")
     sub.add_parser("default", help="print the default board ID")
+    sub.add_parser("core-version", help="print the pinned Arduino ESP32 core version")
     sub.add_parser("validate", help="check boards.json against the firmware sources")
     field = sub.add_parser("field", help="print one board field")
-    field.add_argument("name", choices=("id", "name", "models", "define", "directory", "chip", "flash_size", "fqbn"))
+    field.add_argument("name", choices=("id", "name", "models", "define", "directory", "chip",
+                                        "flash_size", "partitions", "fqbn"))
     field.add_argument("--board")
     for name, help_text in (
         ("vendor-dir", "print the vendor directory for this computer"),
@@ -102,6 +143,9 @@ def main(argv=None):
     fetch = sub.add_parser("fetch-vendor", help="clone the pinned vendor libraries")
     fetch.add_argument("destination")
     fetch.add_argument("--board")
+    prepare = sub.add_parser("prepare-sketch", help="copy the sketch with the selected partition table")
+    prepare.add_argument("destination")
+    prepare.add_argument("--board")
     args = parser.parse_args(argv)
     try:
         data = load()
@@ -110,6 +154,9 @@ def main(argv=None):
             return 0
         if args.command == "default":
             print(data["default"])
+            return 0
+        if args.command == "core-version":
+            print(data["arduino_core"])
             return 0
         if args.command == "validate":
             print(f"{len(data['boards'])} board(s) OK")
@@ -131,6 +178,8 @@ def main(argv=None):
                     return 1
         elif args.command == "fetch-vendor":
             fetch_vendor(entry, args.destination)
+        elif args.command == "prepare-sketch":
+            prepare_sketch(entry, args.destination)
         return 0
     except (ValueError, KeyError, json.JSONDecodeError) as error:
         print(error, file=sys.stderr)

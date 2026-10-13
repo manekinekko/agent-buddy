@@ -8,6 +8,8 @@ BOARD="${BOARD:-$(python3 "$ROOT/tools/boards.py" default)}"
 export BOARD
 FQBN="$(python3 "$ROOT/tools/boards.py" field fqbn)"
 BOARD_DEFINE="$(python3 "$ROOT/tools/boards.py" field define)"
+CORE_VERSION="$(python3 "$ROOT/tools/boards.py" core-version)"
+SKETCH="$ROOT/build/sketch/$BOARD/AgentCompanion"
 ACTION="${1:-build}"
 if [[ ! -x "$CLI" ]]; then
   echo "Arduino CLI not found. Set ARDUINO_CLI to its executable path." >&2
@@ -28,8 +30,9 @@ case "$ACTION" in
     done < <(python3 "$ROOT/tools/boards.py" libraries)
     echo "Building firmware for board $BOARD"
     "$CLI" --config-file "$CONFIG" core list --format json |
-      python3 -c 'import json,sys; d=json.load(sys.stdin); platforms=d.get("platforms",d) if isinstance(d,dict) else d; assert any(p["id"]=="esp32:esp32" and p.get("installed_version")=="3.3.10" for p in platforms), "Install esp32:esp32@3.3.10 (see README)"'
+      python3 -c 'import json,sys; version=sys.argv[1]; d=json.load(sys.stdin); platforms=d.get("platforms",d) if isinstance(d,dict) else d; assert any(p["id"]=="esp32:esp32" and p.get("installed_version")==version for p in platforms), f"Install esp32:esp32@{version} (see README)"' "$CORE_VERSION"
     mkdir -p "$ROOT/build/firmware"
+    python3 "$ROOT/tools/boards.py" prepare-sketch "$SKETCH"
     python3 "$ROOT/tools/firmware_artifacts.py" snapshot
     APP_SIZE="$(python3 "$ROOT/tools/firmware_artifacts.py" app-size)"
     "$CLI" --config-file "$CONFIG" compile --fqbn "$FQBN" \
@@ -37,12 +40,12 @@ case "$ACTION" in
       --build-property "compiler.c.extra_flags=-D$BOARD_DEFINE" \
       --build-property "compiler.cpp.extra_flags=-D$BOARD_DEFINE" \
       "${LIBRARY_ARGS[@]}" --warnings default \
-      --build-path "$ROOT/build/firmware" "$ROOT/firmware/AgentCompanion"
+      --build-path "$ROOT/build/firmware" "$SKETCH"
     python3 "$ROOT/tools/firmware_artifacts.py" record
     ;;
   upload|upload-code)
     PORT="${2:-/dev/cu.usbmodem2101}"
-    if [[ ! -f "$ROOT/build/firmware/AgentCompanion.ino.bin" ]]; then
+    if [[ ! -f "$ROOT/build/firmware/AgentCompanion.ino.bin" || ! -d "$SKETCH" ]]; then
       echo "Build first: bash tools/arduino.sh build" >&2
       exit 1
     fi
@@ -57,7 +60,7 @@ case "$ACTION" in
     fi
     "$CLI" --config-file "$CONFIG" upload --fqbn "$FQBN" \
       --upload-property "upload.extra_flags=$EXTRA_FILES" \
-      --port "$PORT" --input-dir "$ROOT/build/firmware" "$ROOT/firmware/AgentCompanion"
+      --port "$PORT" --input-dir "$ROOT/build/firmware" "$SKETCH"
     sleep 2
     ;;
   monitor)

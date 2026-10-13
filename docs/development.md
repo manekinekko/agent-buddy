@@ -70,11 +70,13 @@ That is why `tools/firmware_artifacts.py`, `tools/flash_release.py` and
 an oversized partition is rejected on the host rather than discovered on the
 device.
 
-The scripts use the existing Arduino IDE CLI, its configuration, and Waveshare's
-bundled GFX library. Overrides: `ARDUINO_CLI`, `ARDUINO_CONFIG`, `WAVESHARE_DIR`,
-and `BOARD` (see [Boards](#boards)).
-Do not substitute a generic display library: the vendor version includes the
-CO5300 panel driver and QSPI path this board needs.
+The scripts use the existing Arduino IDE CLI, its configuration, and the selected
+board's pinned vendor libraries. Overrides: `ARDUINO_CLI`, `ARDUINO_CONFIG`,
+`VENDOR_DIR`, each board's vendor-specific directory variable, and `BOARD`
+(see [Boards](#boards)).
+Do not substitute a generic display library. The S3 target needs Waveshare's
+CO5300 QSPI path, and the P4 target needs its MIPI-DSI implementation and ST7703
+initialization sequence.
 
 ### Boards
 
@@ -83,11 +85,11 @@ a small board layer holds the parts that change from one model to a different mo
 
 | File | Contents |
 | --- | --- |
-| `firmware/boards.json` | One build target for each board: ID, compiler define, Arduino FQBN, chip, flash size, and the pinned vendor libraries. The `default` board is the one that `tools/arduino.sh` and CI build. |
+| `firmware/boards.json` | One build target for each board: ID, compiler define, Arduino FQBN, chip, flash size, partition table, flash image offsets, and pinned vendor libraries. The `default` board is the release built last by CI. |
 | `firmware/AgentCompanion/src/boards/<board>/BoardConfig.h` | Pins, panel size, and chip addresses. Plain constants only, because the native tests include it without the vendor libraries. |
 | `firmware/AgentCompanion/src/boards/<board>/BoardDrivers.h` | The display bus and panel, the touch driver, `accelerometer()`, and `audioOutput()`. Only the device build includes it. |
 | `firmware/AgentCompanion/src/boards/BoardConfig.h`, `BoardDrivers.h` | Selectors: they include the board folder for the `AGENT_BOARD_*` define. |
-| `firmware/AgentCompanion/src/boards/drivers/` | Chip drivers that boards can share: `Qmi8658Accelerometer.h`, `Es8311AudioOutput.h`, and Espressif's ES8311 driver. They are header-only, so a board builds only the drivers that its `BoardDrivers.h` includes. |
+| `firmware/AgentCompanion/src/boards/drivers/` | Chip drivers that boards can share, including QMI8658, GT911, fixed-orientation, and ES8311 implementations. They are header-only, so a board builds only the drivers that its `BoardDrivers.h` includes. |
 
 A board's `accelerometer()` gives `begin()` (returns `nullptr` or the failure
 reason) and `read(x, y, z)` (returns `false` when no new sample is ready). The
@@ -110,9 +112,13 @@ passes the board define with `--build-property compiler.cpp.extra_flags=-D<defin
 ```bash
 python3 tools/boards.py list
 BOARD=waveshare-amoled-175 bash tools/arduino.sh build
+BOARD=waveshare-p4-86 VENDOR_DIR="$PWD/.deps/waveshare-p4" bash tools/arduino.sh build
 ```
 
-Supported now: `waveshare-amoled-175` (Waveshare ESP32-S3-Touch-AMOLED-1.75-B and -C).
+Supported now:
+
+- `waveshare-amoled-175`: Waveshare ESP32-S3-Touch-AMOLED-1.75-B and -C.
+- `waveshare-p4-86`: Waveshare ESP32-P4-WIFI6-Touch-LCD-4B in the 86-panel assembly.
 
 #### Add a board
 
@@ -120,27 +126,31 @@ Supported now: `waveshare-amoled-175` (Waveshare ESP32-S3-Touch-AMOLED-1.75-B an
    addresses, and driver objects to agree with the vendor schematic. Use a
    driver from `src/boards/drivers/`, or add one there for a different chip.
 2. Add a branch for the new define to both selector headers.
-3. Add the board to `firmware/boards.json` with its FQBN and pinned vendor revision.
+3. Add the board to `firmware/boards.json` with its FQBN, partition table, flash
+   image offsets, and pinned vendor revision.
 4. Run `python3 -m unittest tests.test_boards`, then `BOARD=<id> bash tools/arduino.sh build`.
 
-Known limits for boards that are not similar to the current board:
+Current board-layer behavior:
 
-- The display path (`OrientedDisplay`, `DisplayDma`) is a QSPI backend for
-  CO5300-type panels. A parallel RGB panel (for example ST7701) needs a
-  different display backend.
-- Character packs and the renderer use 466 x 466 art. A different panel size
-  needs scaling in the renderer or different art.
-- A board without an IMU or a speaker must still give `accelerometer()` and
-  `audioOutput()`. Their `begin()` can return a reason, and the firmware then
-  runs without orientation or sound.
-- The partition layout and `flash.py` expect an ESP32-S3 with 16 MB flash.
+- `OrientedDisplay` keeps one 466 x 466 logical canvas. The S3 scans it out over
+  QSPI DMA. The P4 copies it into a centered viewport on the 720 x 720 DSI
+  framebuffer. A board with another transport needs a capability-specific
+  scanout branch, not a copy of the renderer.
+- Touch coordinates are mapped from the physical panel into that logical
+  viewport. The S3 uses an interrupt-driven CST9217; the P4 polls its GT911.
+- A board without an IMU supplies the fixed-orientation driver. The firmware
+  then stays upright while touch, audio, networking, and rendering continue.
+- Each board selects its own partition CSV and flash limits. The standalone
+  release flasher validates both the 16 MB ESP32-S3 and 32 MB ESP32-P4 profiles.
+  The P4 uses two 3 MB OTA slots and keeps its memory-mapped character partition
+  below 16 MB because Arduino's prebuilt P4 core uses 24-bit flash cache mapping.
 - Each board other than the default gets its own release ZIP
   (`...-v<version>-<board>-firmware.zip`). The daemon's firmware update
   downloads only the default board's ZIP.
 
 ### Reproduce the toolchain
 
-- Arduino ESP32 core **3.3.10**
+- Arduino ESP32 core **3.3.12**
 - Vendor repository and revision: `vendor` in `firmware/boards.json`
   (Waveshare `ESP32-S3-Touch-AMOLED-1.75` for the default board)
 - Libraries: `examples/arduino/libraries/GFX_Library_for_Arduino`, version 1.6.4,
@@ -154,8 +164,9 @@ arduino-cli config init
 arduino-cli config add board_manager.additional_urls \
   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 arduino-cli core update-index
-arduino-cli core install esp32:esp32@3.3.10
-python3 tools/boards.py fetch-vendor .deps/waveshare
+arduino-cli core install esp32:esp32@3.3.12
+BOARD=waveshare-amoled-175 python3 tools/boards.py fetch-vendor .deps/waveshare-s3
+BOARD=waveshare-p4-86 python3 tools/boards.py fetch-vendor .deps/waveshare-p4
 ```
 
 Set the three path overrides before running the build script. `ARDUINO_CONFIG`
@@ -163,7 +174,7 @@ should point to the configuration created by `arduino-cli config init`.
 Python 3 is used for the core-version check; no Python packages are needed
 to compile or upload the checked-in firmware assets.
 
-### Arduino IDE settings
+### Arduino IDE settings for the default S3 board
 
 Open `firmware/AgentCompanion/AgentCompanion.ino`. Make the vendor GFX library available
 to your sketchbook, then select:

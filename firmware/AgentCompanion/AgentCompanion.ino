@@ -34,7 +34,7 @@
 using namespace copilot;
 
 namespace {
-OrientedDisplay display(&board::displayPanel(), &board::displayBus());
+OrientedDisplay display(&board::displayPanel(), board::displayWriteBus());
 QueueHandle_t freeFrames, readyFrames, commands;
 TaskHandle_t renderTask;
 SpriteRenderer* patchRenderer = nullptr;
@@ -1090,18 +1090,21 @@ void startCharacter() {
 
 void setup() {
   const bool serialBufferReady = Serial.setTxBufferSize(2048) == 2048;
-  // Character uploads send one acknowledged chunk at a time; HWCDC drops bytes when full.
+  // Character uploads send one acknowledged chunk at a time; keep one full chunk buffered.
   const bool receiveBufferReady = Serial.setRxBufferSize(kCharacterUploadRxBufferBytes)
       == kCharacterUploadRxBufferBytes;
+#if COPILOT_SERIAL_USB_CDC
   Serial.setTxTimeoutMs(0);
+#endif
   Serial.begin(115200);
-  if (!serialBufferReady || !receiveBufferReady) fatal("USB buffer allocation failed.");
+  if (!serialBufferReady || !receiveBufferReady) fatal("Serial buffer allocation failed.");
   Serial.setDebugOutput(true);
-  if (!psramFound()) fatal("8 MB OPI PSRAM not detected.");
-  logMessage("\nAgent Companion character shell / %s (%s)\nPanel: %s, touch: %s\nPSRAM: %u bytes\n",
-             board::kName, board::kId, board::kDisplayPanelName, board::kTouchControllerName,
+  if (!psramFound()) fatal("External PSRAM not detected.");
+  logMessage("\nAgent Companion character shell / %s (%s)\nPanel: %s %dx%d, touch: %s\nPSRAM: %u bytes\n",
+             board::kName, board::kId, board::kDisplayPanelName, kPanelWidth, kPanelHeight,
+             board::kTouchControllerName,
              ESP.getPsramSize());
-  if (!display.begin(kSpiFrequency)) fatal(display.error());
+  if (!display.begin(kDisplayBusFrequency)) fatal(display.error());
   display.setBrightness(0);
   display.fillScreen(0);
   characterReady = initializeSpriteStorage();
@@ -1124,7 +1127,7 @@ void setup() {
   beginAudio();
   transferBuffer = static_cast<uint8_t*>(heap_caps_aligned_alloc(
       16, kTransferBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
-  if (!transferBuffer) fatal("DMA staging allocation failed.");
+  if (!transferBuffer) fatal("Display staging allocation failed.");
   if (!display.setTransferBuffer(transferBuffer, kTransferBytes)) fatal(display.error());
   freeFrames = xQueueCreate(2, sizeof(Frame*));
   readyFrames = xQueueCreate(2, sizeof(Frame*));

@@ -59,15 +59,15 @@ import zlib
 from pathlib import Path
 
 if __package__:
-    from . import sprite_codec
+    from . import boards, sprite_codec
 else:
+    import boards
     import sprite_codec
 
 ROOT = Path(__file__).resolve().parents[1]
 CHARACTERS = Path("characters")
 OUTPUT = Path("build/characters")
 HOST_ASSEMBLY = Path("build/character_packs_host.S")
-PARTITIONS = Path("firmware/AgentCompanion/partitions.csv")
 MAGIC = b"ACPK"
 FORMAT_VERSION = 1
 HEADER_BYTES = 256
@@ -222,7 +222,8 @@ def decode(pack, max_bytes=None):
 
 
 def read_assets_partition(root=ROOT):
-    path = root / PARTITIONS
+    _, entry = boards.board(boards.load())
+    path = root / entry["partitions"]
     raw = path.read_bytes()
 
     def number(value):

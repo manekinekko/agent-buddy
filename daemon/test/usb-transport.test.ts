@@ -9,6 +9,8 @@ import {browserCommands} from '../src/browser.js';
 test('recognizes macOS and Linux USB serial device paths', () => {
   assert.equal(isLikelyEsp32Port('/dev/cu.usbmodem2101', 'darwin'), true);
   assert.equal(isLikelyEsp32Port('/dev/tty.usbmodem2101', 'darwin'), true);
+  assert.equal(isLikelyEsp32Port('/dev/cu.wchusbserial5ABA0517681', 'darwin'), true);
+  assert.equal(isLikelyEsp32Port('/dev/tty.usbserial-1410', 'darwin'), true);
   assert.equal(isLikelyEsp32Port('/dev/ttyACM0', 'linux'), true);
   assert.equal(isLikelyEsp32Port('/dev/ttyUSB12', 'linux'), true);
   assert.equal(isLikelyEsp32Port('/dev/ttyS0', 'linux'), false);
@@ -66,6 +68,8 @@ test('picks the Espressif port, with its USB product ID, for installs', () => {
   assert.deepEqual(pickPort(ports, undefined, 'darwin'), {path: '/dev/cu.usbmodem2101', pid: 0x1001});
   assert.deepEqual(pickPort(ports, '/dev/tty.usbmodem1', 'darwin'), {path: '/dev/cu.usbmodem1', pid: 0x43});
   assert.deepEqual(pickPort([{path: '/dev/ttyACM0'}] as never, undefined, 'linux'), {path: '/dev/ttyACM0', pid: null});
+  assert.deepEqual(pickPort([{path: '/dev/tty.wchusbserial123', vendorId: '1A86'}] as never,
+                            undefined, 'darwin'), {path: '/dev/cu.wchusbserial123', pid: null});
   assert.equal(pickPort([{path: '/dev/ttyS0'}] as never, undefined, 'linux'), null);
   assert.equal(pickPort([{path: 'COM3'}] as never, undefined, 'win32'), null);
   assert.deepEqual(pickPort([{path: 'COM3'}, {path: 'COM7', vendorId: '303A', productId: '1001'}] as never,

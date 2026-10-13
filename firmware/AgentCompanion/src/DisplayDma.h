@@ -1,4 +1,6 @@
 #pragma once
+#include "boards/BoardConfig.h"
+#if COPILOT_DISPLAY_QSPI_DMA
 #include <cstddef>
 #include <cstdint>
 #include <driver/spi_master.h>
@@ -27,3 +29,4 @@ class DisplayDma {
   const char* error_ = nullptr;
 };
 }
+#endif

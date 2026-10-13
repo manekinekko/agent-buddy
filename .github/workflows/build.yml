@@ -17,7 +17,7 @@ concurrency:
 env:
   # arduino/setup-arduino-cli's latest release (v2.0.0) still declares node20; run it on Node 24.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  ARDUINO_CORE: esp32:esp32@3.3.10
+  ARDUINO_CORE: esp32:esp32@3.3.12
 
 jobs:
   build:
@@ -92,13 +92,23 @@ jobs:
           arduino-cli --config-file "$config" core update-index
           arduino-cli --config-file "$config" core install "$ARDUINO_CORE"
           # Each board in firmware/boards.json pins its vendor libraries to one revision.
-          python3 tools/boards.py fetch-vendor .deps/waveshare
-      - name: Build matched firmware
+          while IFS= read -r board; do
+            BOARD="$board" python3 tools/boards.py fetch-vendor ".deps/$board"
+          done < <(python3 tools/boards.py list)
+      - name: Compile every board and keep the default release build
         run: |
-          ARDUINO_CLI="$(command -v arduino-cli)" \
-          ARDUINO_CONFIG="$RUNNER_TEMP/arduino/arduino-cli.yaml" \
-          WAVESHARE_DIR="$GITHUB_WORKSPACE/.deps/waveshare" \
-          bash tools/arduino.sh build
+          default="$(python3 tools/boards.py default)"
+          while IFS= read -r board; do
+            if [ "$board" = "$default" ]; then continue; fi
+            BOARD="$board" VENDOR_DIR="$GITHUB_WORKSPACE/.deps/$board" \
+              ARDUINO_CLI="$(command -v arduino-cli)" \
+              ARDUINO_CONFIG="$RUNNER_TEMP/arduino/arduino-cli.yaml" \
+              bash tools/arduino.sh build
+          done < <(python3 tools/boards.py list)
+          BOARD="$default" VENDOR_DIR="$GITHUB_WORKSPACE/.deps/$default" \
+            ARDUINO_CLI="$(command -v arduino-cli)" \
+            ARDUINO_CONFIG="$RUNNER_TEMP/arduino/arduino-cli.yaml" \
+            bash tools/arduino.sh build
       - name: Package firmware and character packs
         run: |
           python tools/package_release.py --version "$(cat VERSION)" \

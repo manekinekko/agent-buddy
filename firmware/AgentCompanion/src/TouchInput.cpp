@@ -56,11 +56,13 @@ bool initializeTouchInput() {
     error = "Unexpected touch controller point capacity.";
     return false;
   }
-  controller.setMaxCoordinates(kDisplaySize - 1, kDisplaySize - 1);
+  controller.setMaxCoordinates(kTouchPanelWidth - 1, kTouchPanelHeight - 1);
   controller.setMirrorXY(kTouchMirrorX, kTouchMirrorY);
   Wire.setTimeOut(8);
-  pinMode(kTouchInterrupt, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(kTouchInterrupt), interrupt, FALLING);
+  if constexpr (kTouchUsesInterrupt) {
+    pinMode(kTouchInterrupt, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(kTouchInterrupt), interrupt, FALLING);
+  }
   initialized = true;
   return true;
 #else
@@ -75,23 +77,36 @@ bool pollTouchGesture(TouchGesture& gesture) {
     error = "Touch input was not initialized.";
     return false;
   }
-  portENTER_CRITICAL(&touchLock);
-  const bool ready = pending;
-  pending = false;
-  portEXIT_CRITICAL(&touchLock);
   const uint32_t now = esp_timer_get_time() / 1000;
-  const bool sweep = now - lastTouchReadMs >= kTouchSweepMs;
-  if (!ready && !tracker.active() && !sweep) return false;
+  bool ready = false;
+  bool sweep = false;
+  if constexpr (kTouchUsesInterrupt) {
+    portENTER_CRITICAL(&touchLock);
+    ready = pending;
+    pending = false;
+    portEXIT_CRITICAL(&touchLock);
+    sweep = now - lastTouchReadMs >= kTouchSweepMs;
+    if (!ready && !tracker.active() && !sweep) return false;
+  } else {
+    if (now - lastTouchReadMs < kTouchPollMs) return false;
+    ready = true;
+  }
   lastTouchReadMs = now;
-  int16_t x[2] = {}, y[2] = {};
-  const uint8_t count = controller.getPoint(x, y, 2);
+  int16_t x[board::kTouchPointCapacity] = {}, y[board::kTouchPointCapacity] = {};
+  const uint8_t count = controller.getPoint(x, y, board::kTouchPointCapacity);
   // An idle sweep that finds nothing must not reach the tracker, or the sweep
   // itself could be read as the end of a gesture that never began.
   if (!ready && !tracker.active() && !count) return false;
   if (count) {
+    const int16_t viewportX = x[0] - kDisplayOffsetX;
+    const int16_t viewportY = y[0] - kDisplayOffsetY;
+    if (viewportX < 0 || viewportY < 0
+        || viewportX >= kDisplaySize || viewportY >= kDisplaySize) {
+      return tracker.sample(false, 0, 0, now, gesture);
+    }
     int16_t transformedX, transformedY;
     if (!ScreenOrientation::panelToContent(
-            touchRotation, kDisplaySize, x[0], y[0], transformedX, transformedY)) {
+            touchRotation, kDisplaySize, viewportX, viewportY, transformedX, transformedY)) {
       return tracker.sample(false, 0, 0, now, gesture);
     }
     x[0] = transformedX;

@@ -21,15 +21,15 @@ mkdir -p .deps/arduino
 arduino-cli config init --dest-dir .deps/arduino
 export ARDUINO_CLI="$(command -v arduino-cli)"
 export ARDUINO_CONFIG="$PWD/.deps/arduino/arduino-cli.yaml"
-export WAVESHARE_DIR="$PWD/.deps/waveshare"
+export VENDOR_DIR="$PWD/.deps/waveshare-s3"
 
 arduino-cli --config-file "$ARDUINO_CONFIG" config add board_manager.additional_urls \
   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 arduino-cli --config-file "$ARDUINO_CONFIG" core update-index
-arduino-cli --config-file "$ARDUINO_CONFIG" core install esp32:esp32@3.3.10
+arduino-cli --config-file "$ARDUINO_CONFIG" core install esp32:esp32@3.3.12
 
 # Clones the vendor libraries at the revision pinned in firmware/boards.json.
-python3 tools/boards.py fetch-vendor "$WAVESHARE_DIR"
+python3 tools/boards.py fetch-vendor "$VENDOR_DIR"
 
 bash tools/arduino.sh build
 .venv/bin/python tools/package_release.py --version "$(cat VERSION)"
@@ -38,6 +38,20 @@ bash tools/arduino.sh build
 `tools/arduino.sh` builds the default board in `firmware/boards.json`. To select a
 board, set `BOARD` (`python3 tools/boards.py list` shows the IDs). See
 [Boards](development.md#boards) to add a board.
+
+For the Waveshare P4 86-panel target:
+
+```bash
+export BOARD=waveshare-p4-86
+export VENDOR_DIR="$PWD/.deps/waveshare-p4"
+python3 tools/boards.py fetch-vendor "$VENDOR_DIR"
+bash tools/arduino.sh build
+bash tools/arduino.sh upload /dev/cu.wchusbserial123456
+```
+
+The P4 target selects the rev1.x `ChipVariant=prev3` profile, 32 MB flash, its
+own OTA partition table, UART0 through the CH343P bridge, and the centered
+466 x 466 Agent Buddy viewport on the 720 x 720 display.
 
 The resulting ZIP files are in `build/release/`. Extract the firmware ZIP and
 follow the [flashing steps](../README.md#step-1-flash-the-firmware). Alternatively, from the same

@@ -26,13 +26,15 @@ class BoardTargetTests(unittest.TestCase):
             self.assertIn(f'"{directory}/{header}"', fallback, header)
 
     def test_board_config_defines_the_shared_contract(self):
-        names = ("kId", "kName", "kDisplaySize", "kDisplayCsPin", "kBrightness", "kSpiFrequency",
-                 "kDisplayQspiWriteCommand", "kDisplayQspiPixelAddress", "kAudioMclkPin",
+        names = ("kId", "kName", "kDisplaySize", "kPanelWidth", "kPanelHeight",
+                 "kDisplayOffsetX", "kDisplayOffsetY", "kBrightness", "kDisplayBusFrequency",
+                 "kAudioMclkPin",
                  "kAudioAmplifierPin", "kAudioCodecI2cAddress", "kAudioMinimumCodecVolume",
                  "kAudioMaximumCodecVolume", "kTouchSda", "kTouchScl", "kTouchI2cAddress", "kTouchMirrorX",
-                 "kI2cFrequency", "kImuI2cAddress", "kImuName", "kBootButtonPin")
-        drivers = ("TouchController", "kTouchPointCapacity", "displayBus", "displayPanel", "accelerometer",
-                   "audioOutput")
+                 "kTouchUsesInterrupt", "kTouchPanelWidth", "kTouchPanelHeight",
+                 "kI2cFrequency", "kImuName", "kBootButtonPin")
+        drivers = ("TouchController", "kTouchPointCapacity", "displayBus", "displayPanel",
+                   "displayWriteBus", "accelerometer", "audioOutput")
         for board_id, entry in self.data["boards"].items():
             config = (boards.BOARD_SOURCES / entry["directory"] / "BoardConfig.h").read_text()
             for name in names:
@@ -43,6 +45,15 @@ class BoardTargetTests(unittest.TestCase):
             source = (boards.BOARD_SOURCES / entry["directory"] / "BoardDrivers.h").read_text()
             for name in drivers:
                 self.assertRegex(source, rf"\b{name}\b", f"{board_id}: {name}")
+            if entry["chip"] == "esp32s3":
+                for name in ("COPILOT_DISPLAY_QSPI_DMA", "kDisplayCsPin",
+                             "kDisplayQspiWriteCommand", "kDisplayQspiPixelAddress",
+                             "kImuI2cAddress"):
+                    self.assertRegex(config, rf"\b{name}\b", f"{board_id}: {name}")
+            if entry["chip"] == "esp32p4":
+                for name in ("COPILOT_DISPLAY_FRAMEBUFFER", "kDisplayBacklightPin",
+                             "kDisplayBacklightEnablePin"):
+                    self.assertRegex(config, rf"\b{name}\b", f"{board_id}: {name}")
 
     def test_shared_firmware_has_no_board_pins_or_vendor_drivers(self):
         shared = [path for path in FIRMWARE.rglob("*") if path.suffix in (".ino", ".h", ".cpp")
@@ -70,8 +81,14 @@ class BoardTargetTests(unittest.TestCase):
             lambda d: d["boards"][board_id].update(define="AGENT_BOARD_NOT_IN_SELECTOR"),
             lambda d: d["boards"][board_id].update(directory="missing_folder"),
             lambda d: d["boards"][board_id].pop("fqbn"),
+            lambda d: d["boards"][board_id].pop("partitions"),
+            lambda d: d["boards"][board_id].pop("flash"),
+            lambda d: d["boards"][board_id].update(partitions=7),
+            lambda d: d["boards"][board_id].update(flash_size=32),
+            lambda d: d["boards"][board_id].update(directory=["not", "a", "folder"]),
             lambda d: d["boards"][board_id]["vendor"].pop("revision"),
             lambda d: d["boards"].update({"Bad_ID": d["boards"][board_id]}),
+            lambda d: d.update(arduino_core="latest"),
         ]
         for index, change in enumerate(changes):
             with self.subTest(change=index):
@@ -87,6 +104,14 @@ class BoardTargetTests(unittest.TestCase):
     def test_vendor_revision_is_pinned(self):
         for entry in self.data["boards"].values():
             self.assertRegex(entry["vendor"]["revision"], r"^[0-9a-f]{40}$")
+
+    def test_each_board_has_a_partition_table_and_safe_flash_offsets(self):
+        for board_id, entry in self.data["boards"].items():
+            self.assertTrue((ROOT / entry["partitions"]).is_file(), board_id)
+            offsets = [int(entry["flash"][key], 0) for key in
+                       ("bootloader_offset", "partitions_offset", "boot_app0_offset")]
+            self.assertEqual(offsets, sorted(offsets), board_id)
+            self.assertLess(offsets[-1], 0x10000, board_id)
 
 
 if __name__ == "__main__":

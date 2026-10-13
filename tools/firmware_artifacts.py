@@ -25,8 +25,23 @@ def digest(path):
     return result.hexdigest()
 
 
-def layout(root):
-    with (root / "firmware/AgentCompanion/partitions.csv").open() as source:
+def target(board_id=None):
+    data = boards.load()
+    selected, entry = boards.board(data, board_id)
+    return data, selected, entry
+
+
+def flash_bytes(entry):
+    value = entry["flash_size"]
+    if not isinstance(value, str) or not value.endswith("MB"):
+        raise ValueError("Board flash_size must be expressed in MB.")
+    return int(value[:-2]) * 1024 * 1024
+
+
+def layout(root, board_id=None):
+    _, selected, entry = target(board_id)
+    partition_path = root / entry["partitions"]
+    with partition_path.open() as source:
         rows = [row for row in csv.reader(line for line in source if line.strip() and not line.lstrip().startswith("#"))]
     partitions = {}
     for row in rows:
@@ -40,9 +55,10 @@ def layout(root):
         raise ValueError("The otadata, app0, app1 and assets partitions are required.")
     regions = sorted(partitions.values(), key=lambda item: item["offset"])
     end = 0x9000
+    limit = flash_bytes(entry)
     for item in regions:
-        if item["offset"] < end or item["size"] <= 0 or item["offset"] + item["size"] > 0x1000000:
-            raise ValueError("Partition overlap or invalid 16 MiB flash bounds.")
+        if item["offset"] < end or item["size"] <= 0 or item["offset"] + item["size"] > limit:
+            raise ValueError(f"Partition overlap or invalid {entry['flash_size']} flash bounds.")
         end = item["offset"] + item["size"]
     app, spare, assets = partitions["app0"], partitions["app1"], partitions["assets"]
     if app["kind"] != "app" or app["subtype"] != "ota_0" or app["offset"] != 0x10000:
@@ -58,11 +74,30 @@ def layout(root):
 
 
 def selected_board():
-    return boards.board(boards.load())[0]
+    return target()[1]
+
+
+def release_regions(root, board_id=None):
+    _, selected, entry = target(board_id)
+    app, assets = layout(root, selected)
+    flash = entry["flash"]
+    bootloader = int(flash["bootloader_offset"], 0)
+    partitions = int(flash["partitions_offset"], 0)
+    boot_app0 = int(flash["boot_app0_offset"], 0)
+    if not bootloader < partitions < boot_app0 < app["offset"]:
+        raise ValueError(f"Board {selected} has unsafe release image offsets.")
+    return [
+        (bootloader, partitions - bootloader),
+        (partitions, 0x1000),
+        (boot_app0, app["offset"] - boot_app0),
+        (app["offset"], app["size"]),
+        (assets["offset"], assets["size"]),
+    ]
 
 
 def fingerprint(root, board=None):
-    app, assets = layout(root)
+    selected = board or selected_board()
+    app, assets = layout(root, selected)
     pack = root / DEFAULT_PACK
     if not 0 < pack.stat().st_size <= assets["size"]:
         raise ValueError("Default character pack is empty or exceeds the assets partition.")
@@ -71,7 +106,8 @@ def fingerprint(root, board=None):
     if (root / "firmware/boards.json").is_file():
         paths.append(root / "firmware/boards.json")
     paths.append(pack)
-    return dict(board=board or selected_board(), app=app, assets=assets, files={path.relative_to(root).as_posix(): digest(path) for path in paths})
+    return dict(board=selected, app=app, assets=assets,
+                files={path.relative_to(root).as_posix(): digest(path) for path in paths})
 
 
 def write_json(path, value):

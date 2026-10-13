@@ -674,7 +674,8 @@ export function pickPort(ports: readonly PortInfo[], preferred?: string,
 
 export function isLikelyEsp32Port(
     path: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform === 'darwin') return /^\/dev\/(?:cu|tty)\.usbmodem/i.test(path);
+  if (platform === 'darwin')
+    return /^\/dev\/(?:cu|tty)\.(?:usbmodem|usbserial|wchusbserial)/i.test(path);
   if (platform === 'win32') return /^COM\d+$/i.test(path);
   return /^\/dev\/tty(?:ACM|USB)\d+$/i.test(path);
 }

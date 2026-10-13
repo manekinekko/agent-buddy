@@ -44,7 +44,7 @@ def package(root, version, name=RELEASE_NAME, output=None, repository=RELEASE_RE
     board_id = json.loads((root / firmware_artifacts.BUNDLE).read_text())["inputs"]["board"]
     board_data = firmware_artifacts.boards.load()
     board = board_data["boards"][board_id]
-    app, assets = firmware_artifacts.layout(root)
+    _, assets = firmware_artifacts.layout(root, board_id)
     if not (root / character_pack.CHARACTERS / "built-in.json").is_file():
         raise ValueError("characters/built-in.json is required for release packaging.")
     characters = {}
@@ -64,8 +64,7 @@ def package(root, version, name=RELEASE_NAME, output=None, repository=RELEASE_RE
         "build/firmware/AgentCompanion.ino.bin",
         str(firmware_artifacts.DEFAULT_PACK),
     )
-    regions = [(0, 0x8000), (0x8000, 0x1000), (0xe000, 0x2000),
-               (app["offset"], app["size"]), (assets["offset"], assets["size"])]
+    regions = firmware_artifacts.release_regions(root, board_id)
     files = {}
     images = []
     for filename, source, (offset, budget) in zip(IMAGE_NAMES, sources, regions):

@@ -1,7 +1,9 @@
 #pragma once
 #include "Config.h"
 #include "ScreenOrientation.h"
+#if COPILOT_DISPLAY_QSPI_DMA
 #include "DisplayDma.h"
+#endif
 #include <Arduino_GFX_Library.h>
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +19,7 @@ class OrientedDisplay : public Arduino_Canvas {
   bool setTrim(float radians);
   float angle() const { return ScreenOrientation::shortestAngle(orientation_.angle() + trim_); }
   bool setTransferBuffer(uint8_t* buffer, size_t bytes);
-  void setBrightness(uint8_t brightness) { panel_->setBrightness(brightness); }
+  void setBrightness(uint8_t brightness);
   const char* error() const { return error_; }
   uint32_t composeUs() const { return composeUs_; }
   uint32_t writeUs() const { return writeUs_; }
@@ -33,6 +35,8 @@ class OrientedDisplay : public Arduino_Canvas {
   bool frameMarginsDirty_ = true;
   const char* error_ = nullptr;
   uint32_t composeUs_ = 0, writeUs_ = 0;
+#if COPILOT_DISPLAY_QSPI_DMA
   DisplayDma dma_;
+#endif
 };
 }

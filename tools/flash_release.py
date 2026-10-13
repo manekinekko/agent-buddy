@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and install an extracted, matched ESP32-S3 firmware release."""
+"""Validate and install an extracted, board-matched Agent Buddy firmware release."""
 import argparse
 import hashlib
 import importlib.metadata
@@ -13,7 +13,7 @@ ESPTOOL_VERSION = "5.3.0"
 MIN_PYTHON = (3, 10)
 # The marker lets pip skip esptool on older Pythons so require_python() can explain the fix.
 REQUIREMENTS = f'esptool=={ESPTOOL_VERSION}; python_version >= "{MIN_PYTHON[0]}.{MIN_PYTHON[1]}"\n'
-FLASH_BYTES = 0x1000000
+FLASH_BYTES = 0x2000000
 IMAGE_NAMES = (
     "bin/bootloader.bin", "bin/partitions.bin", "bin/boot_app0.bin",
     "bin/application.bin", "bin/character-copilot.acpk",
@@ -24,6 +24,22 @@ WARNING = (
     "NVS bytes at 0x9000..0xe000 are preserved, but settings from an existing layout may be "
     "incompatible. No erase-flash is performed."
 )
+BOARD_PROFILES = {
+    "waveshare-amoled-175": {
+        "chip": "esp32s3",
+        "flash_size": "16MB",
+        "flash_bytes": 0x1000000,
+        "regions": ((0, 0x8000), (0x8000, 0x1000), (0xe000, 0x2000),
+                    (0x10000, 0x200000), (0x410000, 0xBE0000)),
+    },
+    "waveshare-p4-86": {
+        "chip": "esp32p4",
+        "flash_size": "32MB",
+        "flash_bytes": 0x2000000,
+        "regions": ((0x2000, 0x6000), (0x8000, 0x1000), (0xe000, 0x2000),
+                    (0x10000, 0x300000), (0x610000, 0x9E0000)),
+    },
+}
 
 
 def validate_identity(name, version):
@@ -51,16 +67,19 @@ def validate_manifest(manifest, files):
     validate_identity(manifest.get("name"), manifest.get("version"))
     if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
         raise ValueError("Unsupported manifest schema.")
-    if manifest.get("chip") != "esp32s3" or manifest.get("flash_size") != "16MB":
-        raise ValueError("Unsupported chip or flash size; expected ESP32-S3 with 16MB.")
     # Releases before the board layer have no board field; they are for waveshare-amoled-175.
     board = manifest.get("board", "waveshare-amoled-175")
     if not isinstance(board, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", board, flags=re.ASCII):
         raise ValueError("Invalid board ID in the manifest.")
+    profile = BOARD_PROFILES.get(board)
+    if not profile:
+        raise ValueError(f"Unsupported board: {board}.")
+    if (manifest.get("chip"), manifest.get("flash_size")) != (
+            profile["chip"], profile["flash_size"]):
+        raise ValueError("Manifest chip or flash size does not match its board.")
     images = manifest.get("images")
     if not isinstance(images, list) or len(images) != len(IMAGE_NAMES):
         raise ValueError("Manifest must contain exactly the five supported images.")
-    limits = [(0, 0x8000), (0x8000, 0x1000), (0xe000, 0x2000)]
     end = 0
     for index, (image, filename) in enumerate(zip(images, IMAGE_NAMES)):
         if not isinstance(image, dict) or image.get("file") != filename:
@@ -68,13 +87,12 @@ def validate_manifest(manifest, files):
         offset = _integer(image.get("offset"), "image offset")
         capacity = _integer(image.get("max_size"), "image budget")
         size = _integer(image.get("size"), "image size")
-        if index < 3 and (offset, capacity) != limits[index]:
-            raise ValueError(f"Unsafe offset or budget for {filename}.")
-        if index == 3 and (offset != 0x10000 or capacity != 0x200000):
-            raise ValueError("Unsafe application offset or budget; expected a 2 MiB app0 slot at 0x10000.")
-        if index == 4 and (offset < end or offset % 0x10000):
-            raise ValueError("Unsafe assets offset or partition overlap.")
-        if capacity == 0 or size == 0 or size > capacity or offset + capacity > FLASH_BYTES:
+        if index < 4 and (offset, capacity) != profile["regions"][index]:
+            raise ValueError(f"Unsafe offset or budget for {filename} on board {board}.")
+        if index == 4 and (
+                offset < profile["regions"][index][0] or offset % 0x10000 or offset < end):
+            raise ValueError(f"Unsafe offset or budget for {filename} on board {board}.")
+        if capacity == 0 or size == 0 or size > capacity or offset + capacity > profile["flash_bytes"]:
             raise ValueError(f"Image exceeds its flash budget: {filename}.")
         if offset < end:
             raise ValueError("Image partitions overlap.")
@@ -150,9 +168,9 @@ def require_dependencies():
 
 def flash_command(root, manifest, port):
     command = [
-        sys.executable, "-m", "esptool", "--chip", "esp32s3", "--port", port,
+        sys.executable, "-m", "esptool", "--chip", manifest["chip"], "--port", port,
         "--baud", "460800", "write-flash", "--flash-mode", "keep",
-        "--flash-freq", "keep", "--flash-size", "16MB",
+        "--flash-freq", "keep", "--flash-size", manifest["flash_size"],
     ]
     for image in manifest["images"]:
         command.extend((hex(image["offset"]), str(Path(root) / image["file"])))

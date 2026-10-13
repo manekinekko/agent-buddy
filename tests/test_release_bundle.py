@@ -2,6 +2,7 @@ import contextlib
 import importlib.metadata
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -107,6 +108,30 @@ class ReleaseBundleTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-S", str(extracted / "flash.py"), "--verify-only"],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_p4_release_uses_board_specific_flash_profile(self):
+        self.put("firmware/AgentCompanion/partitions-waveshare-p4-86.csv",
+                 "nvs,data,nvs,0x9000,0x5000,\n"
+                 "otadata,data,ota,0xE000,0x2000,\n"
+                 "app0,app,ota_0,0x10000,0x300000,\n"
+                 "app1,app,ota_1,0x310000,0x300000,\n"
+                 "assets,data,0x40,0x610000,0x9E0000,\n"
+                 "coredump,data,coredump,0xFF0000,0x10000,\n")
+        with mock.patch.dict(os.environ, {"BOARD": "waveshare-p4-86"}):
+            firmware_artifacts.snapshot(self.root)
+            firmware_artifacts.record(self.root)
+            firmware, _ = package_release.package(self.root, "1.2.3")
+        self.assertEqual(firmware.name, "agent-buddy-v1.2.3-waveshare-p4-86-firmware.zip")
+        extracted = self.root / "p4-extracted"
+        with zipfile.ZipFile(firmware) as archive:
+            archive.extractall(extracted)
+        manifest = flash_release.verify_bundle(extracted)
+        self.assertEqual((manifest["chip"], manifest["flash_size"]), ("esp32p4", "32MB"))
+        self.assertEqual([image["offset"] for image in manifest["images"]],
+                         [0x2000, 0x8000, 0xe000, 0x10000, 0x610000])
+        command = flash_release.flash_command(extracted, manifest, "/dev/cu.wchusbserial1")
+        self.assertIn("esp32p4", command)
+        self.assertIn("32MB", command)
 
     def test_release_identity_matches_daemon_download(self):
         daemon = (ROOT / "daemon/src/firmware-release.ts").read_text()

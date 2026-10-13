@@ -107,6 +107,24 @@ class FirmwareBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "match app0"):
             layout(self.root)
 
+    def test_p4_uses_its_32_mb_partition_table(self):
+        self.put("firmware/AgentCompanion/partitions-waveshare-p4-86.csv",
+                 "nvs,data,nvs,0x9000,0x5000,\n"
+                 "otadata,data,ota,0xE000,0x2000,\n"
+                 "app0,app,ota_0,0x10000,0x300000,\n"
+                 "app1,app,ota_1,0x310000,0x300000,\n"
+                 "assets,data,0x40,0x610000,0x9E0000,\n"
+                 "coredump,data,coredump,0xFF0000,0x10000,\n")
+        with mock.patch.dict(os.environ, {"BOARD": "waveshare-p4-86"}):
+            app, assets = layout(self.root)
+            self.assertEqual((app["size"], assets["offset"], assets["size"]),
+                             (0x300000, 0x610000, 0x9E0000))
+            snapshot(self.root)
+            record(self.root)
+            check(self.root)
+            bundle = json.loads((self.root / BUNDLE).read_text())
+            self.assertEqual(bundle["inputs"]["board"], "waveshare-p4-86")
+
 
 if __name__ == "__main__":
     unittest.main()

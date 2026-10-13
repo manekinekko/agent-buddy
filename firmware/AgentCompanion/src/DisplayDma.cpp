@@ -1,4 +1,5 @@
 #include "DisplayDma.h"
+#if COPILOT_DISPLAY_QSPI_DMA
 #include "Config.h"
 #include <Arduino_GFX_Library.h>
 #include <driver/gpio.h>
@@ -119,3 +120,4 @@ bool DisplayDma::finish() {
   return error_ == nullptr;
 }
 }
+#endif

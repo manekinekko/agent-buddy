@@ -7,6 +7,10 @@
 
 class Arduino_CO5300;
 
+#define COPILOT_DISPLAY_QSPI_DMA 1
+#define COPILOT_DISPLAY_FRAMEBUFFER 0
+#define COPILOT_SERIAL_USB_CDC 1
+
 namespace copilot {
 namespace board {
 // Declared here so display code can name the panel without the vendor library.
@@ -18,7 +22,12 @@ constexpr char kTouchControllerName[] = "CST9217";
 constexpr char kImuName[] = "QMI8658";
 }  // namespace board
 
+// Agent Buddy renders into one square logical canvas. This panel has no outer viewport.
 constexpr int kDisplaySize = 466;
+constexpr int kPanelWidth = 466;
+constexpr int kPanelHeight = 466;
+constexpr int kDisplayOffsetX = 0;
+constexpr int kDisplayOffsetY = 0;
 constexpr int kDisplayCsPin = 12;
 constexpr int kDisplaySckPin = 38;
 constexpr int kDisplayD0Pin = 4;
@@ -28,7 +37,8 @@ constexpr int kDisplayD3Pin = 7;
 constexpr int kDisplayResetPin = 39;
 // The panel's visible area starts at column 6 of the controller's memory.
 constexpr int kDisplayColumnOffset = 6;
-constexpr int kSpiFrequency = 80000000;
+constexpr int kDisplayBusFrequency = 80000000;
+constexpr int kSpiFrequency = kDisplayBusFrequency;
 // CO5300 QSPI pixel write: command 0x32, address 0x003C00 (RAMWR).
 constexpr uint8_t kDisplayQspiWriteCommand = 0x32;
 constexpr uint32_t kDisplayQspiPixelAddress = 0x003C00;
@@ -52,6 +62,10 @@ constexpr int kTouchScl = 14;
 constexpr int kTouchInterrupt = 11;
 constexpr int kTouchReset = 40;
 constexpr uint8_t kTouchI2cAddress = 0x5A;
+constexpr bool kTouchUsesInterrupt = true;
+constexpr unsigned kTouchPollMs = 8;
+constexpr int kTouchPanelWidth = kPanelWidth;
+constexpr int kTouchPanelHeight = kPanelHeight;
 constexpr bool kTouchMirrorX = true;
 constexpr bool kTouchMirrorY = true;
 constexpr uint8_t kImuI2cAddress = 0x6B;
