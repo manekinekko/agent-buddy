@@ -261,6 +261,43 @@ test('voice service plays its cached acknowledgment while transcription is still
   });
 });
 
+test('voice service synthesizes and plays harness input prompts', async () => {
+  await withDirectory('input-prompt', async directory => {
+    const calls: Array<{command: string; args: readonly string[]}> = [];
+    const played: Buffer[] = [];
+    const spokenTexts: string[] = [];
+    const runner: VoiceProcessRunner = async (command, args) => {
+      calls.push({command, args});
+      if (command.endsWith('/say')) {
+        spokenTexts.push(await readFile(args[args.indexOf('-f') + 1]!, 'utf8'));
+        await writeFile(args[args.indexOf('-o') + 1]!, 'aiff');
+      } else if (command.endsWith('ffmpeg')) {
+        await writeFile(args.at(-1)!, Buffer.from([1, 0, 2, 0]));
+      }
+      return {stdout: '', stderr: ''};
+    };
+    const service = await LocalVoiceService.create({
+      configPath: join(directory, 'voice.json'),
+      voiceDirectory: join(directory, 'voice'),
+      workingDirectory: directory,
+      playPcm: async pcm => { played.push(Buffer.from(pcm)); },
+      detectDependencies: async () => dependencies(true),
+      runProcess: runner,
+    });
+
+    assert.equal(await service.speakInputPrompt('Would you like to continue?'), true);
+    assert.equal(played.length, 1);
+    assert.deepEqual(spokenTexts, ['I am on it.', 'Would you like to continue?']);
+    assert.deepEqual(calls.map(call => call.command), [
+      '/usr/bin/say', '/tools/ffmpeg', '/usr/bin/say', '/tools/ffmpeg',
+    ]);
+
+    await service.updateConfig({enabled: false});
+    assert.equal(await service.speakInputPrompt('This should stay silent.'), false);
+    assert.equal(played.length, 1);
+  });
+});
+
 test('voice service enforces one active turn and cancellation', async () => {
   await withDirectory('cancel', async directory => {
     let copilotStarted: (() => void) | undefined;

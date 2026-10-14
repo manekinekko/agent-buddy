@@ -15,9 +15,13 @@ import {loadAgentBadgeIcons} from './agent-badges.js';
 import {desktopBackdrops, isDesktopBackdrop, isDesktopVolume} from './display-settings.js';
 import {isUsageWindow, usageWindows} from './usage-tracker.js';
 import {LocalVoiceService} from './local-voice-service.js';
+import {inputPromptAnnouncement} from './input-prompt.js';
+import type {AgentId} from './agents/types.js';
+import type {HookEvent, HookPayload} from './protocol.js';
 
 const autoInstallRetryMs = 5 * 60 * 1000;
 const voiceLevelWindowSamples = 1600;
+const inputPromptDedupeMs = 30_000;
 
 function voiceCaptureLevels(pcm: Buffer): {
   mean: number;
@@ -122,8 +126,27 @@ export async function runDaemon(): Promise<void> {
   await removeStaleSocket(path);
 
   const companion = service;
+  const recentInputPrompts = new Map<string, number>();
+  const announceInputPrompt = (agent: AgentId, event: HookEvent, payload: HookPayload) => {
+    if (!transport.capabilities.speaker || !voice?.snapshot().config.enabled) return;
+    const announcement = inputPromptAnnouncement(agent, event, payload);
+    if (!announcement) return;
+    const now = Date.now();
+    const previous = recentInputPrompts.get(announcement.key);
+    if (previous !== undefined && now - previous < inputPromptDedupeMs) return;
+    for (const [key, announcedAt] of recentInputPrompts) {
+      if (now - announcedAt >= inputPromptDedupeMs) recentInputPrompts.delete(key);
+    }
+    recentInputPrompts.set(announcement.key, now);
+    void voice.speakInputPrompt(announcement.text).then(spoken => {
+      if (!spoken) recentInputPrompts.delete(announcement.key);
+    }).catch(error => {
+      recentInputPrompts.delete(announcement.key);
+      console.error(`[voice] input prompt failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  };
   const server = createServer({allowHalfOpen: true},
-    socket => handleSocket(socket, coordinator, transport, companion, () => settingsUrl));
+    socket => handleSocket(socket, coordinator, transport, companion, () => settingsUrl, announceInputPrompt));
   server.on('error', error => {
     console.error(`[daemon] ${error.message}`);
     process.exitCode = 1;
@@ -165,7 +188,8 @@ export async function runDaemon(): Promise<void> {
 export const agentHookTimeoutMs = 45_000;
 
 export function handleSocket(socket: Socket, coordinator: StateCoordinator, transport: DeviceTransport,
-                      service: CompanionService, settingsUrl: () => string | null): void {
+                      service: CompanionService, settingsUrl: () => string | null,
+                      onHook?: (agent: AgentId, event: HookEvent, payload: HookPayload) => void): void {
   socket.setEncoding('utf8');
   socket.setTimeout(2000, () => socket.destroy());
   socket.on('error', () => undefined);
@@ -197,7 +221,9 @@ export function handleSocket(socket: Socket, coordinator: StateCoordinator, tran
         const canonical = hookEvents.includes(eventName as never) && !request.nativeEvent
           ? [{event: eventName as typeof hookEvents[number], payload: request.payload ?? {}}]
           : normalizeAgentHook(agent, request.nativeEvent ?? eventName, request.payload ?? {});
-        for (const hook of canonical) service.handleHook(agent, hook.event, hook.payload);
+        for (const hook of canonical) {
+          if (service.handleHook(agent, hook.event, hook.payload)) onHook?.(agent, hook.event, hook.payload);
+        }
         // A manual `send` only lasts until the next agent event; otherwise the device keeps it for
         // as long as the coordinator stays in one state, which can be hours while agents work.
         if (transport.state !== coordinator.state) transport.setState(coordinator.state);

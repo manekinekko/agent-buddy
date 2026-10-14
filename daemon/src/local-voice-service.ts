@@ -32,6 +32,7 @@ const maxVoiceNameLength = 128;
 const maxTranscriptCharacters = 32_000;
 const maxSpokenCharacters = 20_000;
 const maxTtsTestCharacters = 500;
+const maxInputPromptCharacters = 600;
 const maxPcmPlaybackBytes = playbackSampleRate * 45 * 2;
 const defaultProcessOutputBytes = 1024 * 1024;
 const processKillGraceMs = 2000;
@@ -706,6 +707,32 @@ export class LocalVoiceService extends EventEmitter implements LocalVoiceControl
     return this.#exclusive('speaking', signal => this.#playAcknowledgment(signal));
   }
 
+  async speakInputPrompt(text: string): Promise<boolean> {
+    const message = text.trim();
+    if (!message || message.length > maxInputPromptCharacters)
+      throw new VoiceConfigurationError(
+        `Input prompt text must contain 1 to ${maxInputPromptCharacters} characters.`);
+    if (!this.#config.enabled) {
+      this.#log('input prompt skipped: local voice is disabled');
+      return false;
+    }
+    if (this.#active) {
+      this.#log('input prompt skipped: another voice operation is active');
+      return false;
+    }
+    await this.#exclusive('speaking', async signal => {
+      await this.#refreshDependencies();
+      this.#requireTtsReady();
+      const turnDirectory = await this.#turnDirectory();
+      try {
+        await this.#synthesizeAndPlay(message, turnDirectory, signal, 'input-prompt');
+      } finally {
+        await rm(turnDirectory, {recursive: true, force: true});
+      }
+    });
+    return true;
+  }
+
   async processCapture(
       pcm: Buffer, sampleRate: number, options: VoiceTurnOptions = {}): Promise<VoiceTurnResult> {
     if (sampleRate !== captureSampleRate)
@@ -811,15 +838,17 @@ export class LocalVoiceService extends EventEmitter implements LocalVoiceControl
       throw new VoiceDependencyError(`Local TTS dependencies are missing: ${missing.map(item => item.message).join(' ')}`);
   }
 
-  async #synthesizeAndPlay(text: string, directory: string, signal: AbortSignal): Promise<number> {
-    const pcm = await this.#synthesize(text, directory, signal, 'response');
-    await this.#timed('response playback', () => this.#playPcm(pcm, playbackSampleRate, signal));
+  async #synthesizeAndPlay(
+      text: string, directory: string, signal: AbortSignal,
+      label: 'response' | 'input-prompt' = 'response'): Promise<number> {
+    const pcm = await this.#synthesize(text, directory, signal, label);
+    await this.#timed(`${label.replace('-', ' ')} playback`, () => this.#playPcm(pcm, playbackSampleRate, signal));
     return pcm.length;
   }
 
   async #synthesize(
       text: string, directory: string, signal: AbortSignal,
-      label: 'acknowledgment' | 'response'): Promise<Buffer> {
+      label: 'acknowledgment' | 'response' | 'input-prompt'): Promise<Buffer> {
     if (text.length > maxSpokenCharacters)
       throw new LocalVoiceError(
         `The Copilot response is ${text.length} characters, which is too long to synthesize safely.`,

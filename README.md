@@ -769,6 +769,11 @@ seconds and generated playback to 45 seconds. Each voice conversation uses its
 own persisted Copilot CLI session, not the chat currently open in the Copilot
 app.
 
+When an installed agent hook reports that the app is waiting for you, a
+speaker-capable board reads the question and its choices aloud. Plan and
+permission requests use a short spoken approval question. Repeated hook
+delivery is suppressed so one request is announced once.
+
 Voice enables Copilot CLI's `--allow-all-tools` mode so spoken requests can run
 commands and change files without another approval prompt. Enable it only when
 that behavior is acceptable. USB audio stays on the cable. Wi-Fi audio uses an
