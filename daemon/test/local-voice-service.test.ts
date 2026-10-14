@@ -298,6 +298,52 @@ test('voice service synthesizes and plays harness input prompts', async () => {
   });
 });
 
+test('voice service queues an input prompt behind active playback', async () => {
+  await withDirectory('queued-input-prompt', async directory => {
+    let releasePlayback: (() => void) | undefined;
+    const playbackBlocked = new Promise<void>(resolve => {
+      releasePlayback = resolve;
+    });
+    let firstPlaybackStarted: (() => void) | undefined;
+    const firstPlayback = new Promise<void>(resolve => {
+      firstPlaybackStarted = resolve;
+    });
+    let playbackCount = 0;
+    const runner: VoiceProcessRunner = async (command, args) => {
+      if (command.endsWith('/say')) {
+        await writeFile(args[args.indexOf('-o') + 1]!, 'aiff');
+      } else if (command.endsWith('ffmpeg')) {
+        await writeFile(args.at(-1)!, Buffer.from([1, 0, 2, 0]));
+      }
+      return {stdout: '', stderr: ''};
+    };
+    const service = await LocalVoiceService.create({
+      configPath: join(directory, 'voice.json'),
+      voiceDirectory: join(directory, 'voice'),
+      workingDirectory: directory,
+      playPcm: async () => {
+        playbackCount += 1;
+        if (playbackCount === 1) {
+          firstPlaybackStarted!();
+          await playbackBlocked;
+        }
+      },
+      detectDependencies: async () => dependencies(true),
+      runProcess: runner,
+    });
+
+    const testPlayback = service.testTts('Testing active playback.');
+    await firstPlayback;
+    const prompt = service.speakInputPrompt('Would you like to continue?');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(playbackCount, 1);
+    releasePlayback!();
+    await testPlayback;
+    assert.equal(await prompt, true);
+    assert.equal(playbackCount, 2);
+  });
+});
+
 test('voice service enforces one active turn and cancellation', async () => {
   await withDirectory('cancel', async directory => {
     let copilotStarted: (() => void) | undefined;

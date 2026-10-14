@@ -585,6 +585,7 @@ export class LocalVoiceService extends EventEmitter implements LocalVoiceControl
   #lastError: string | null = null;
   #active: {controller: AbortController} | null = null;
   #acknowledgmentPcm: Buffer | null = null;
+  #inputPromptQueue: Promise<void> = Promise.resolve();
 
   private constructor(options: {
     playPcm: PcmPlaybackCallback;
@@ -707,19 +708,24 @@ export class LocalVoiceService extends EventEmitter implements LocalVoiceControl
     return this.#exclusive('speaking', signal => this.#playAcknowledgment(signal));
   }
 
-  async speakInputPrompt(text: string): Promise<boolean> {
+  speakInputPrompt(text: string): Promise<boolean> {
     const message = text.trim();
     if (!message || message.length > maxInputPromptCharacters)
       throw new VoiceConfigurationError(
         `Input prompt text must contain 1 to ${maxInputPromptCharacters} characters.`);
+    const task = this.#inputPromptQueue.then(() => this.#speakInputPrompt(message));
+    this.#inputPromptQueue = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  async #speakInputPrompt(message: string): Promise<boolean> {
     if (!this.#config.enabled) {
       this.#log('input prompt skipped: local voice is disabled');
       return false;
     }
-    if (this.#active) {
-      this.#log('input prompt skipped: another voice operation is active');
-      return false;
-    }
+    if (this.#active) this.#log('input prompt queued until the current voice operation finishes');
+    await this.#waitUntilIdle();
+    if (!this.#config.enabled) return false;
     await this.#exclusive('speaking', async signal => {
       await this.#refreshDependencies();
       this.#requireTtsReady();
@@ -731,6 +737,18 @@ export class LocalVoiceService extends EventEmitter implements LocalVoiceControl
       }
     });
     return true;
+  }
+
+  #waitUntilIdle(): Promise<void> {
+    if (!this.#active) return Promise.resolve();
+    return new Promise(resolve => {
+      const changed = () => {
+        if (this.#active) return;
+        this.off('change', changed);
+        resolve();
+      };
+      this.on('change', changed);
+    });
   }
 
   async processCapture(
