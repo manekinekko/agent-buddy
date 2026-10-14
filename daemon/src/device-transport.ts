@@ -5,6 +5,7 @@ import type {WifiConfig} from './wifi-config.js';
 import type {ConnectionMode} from './connection-mode.js';
 import type {AgentBadgeActive, AgentBadgeIconDefinition} from './agent-badges.js';
 import type {DeviceOrientation} from './orientation-settings.js';
+import type {DeviceCapabilities, VoiceCapture} from './voice-audio.js';
 
 export interface CharacterInstallResult {
   character: string;
@@ -23,16 +24,27 @@ export class DeviceTransport {
   #mode: ConnectionMode = 'auto';
   #enabled = true;
   #lastPress: {presses: number; at: number} | null = null;
+  #voiceNotificationActive = false;
   readonly #missing: () => void;
   readonly #button: () => void;
-  readonly #usb = new UsbTransport(() => this.#route(), presses => this.#pressed(presses));
-  readonly #wifi = new WifiTransport(() => this.#route(), presses => this.#pressed(presses));
+  readonly #voiceCaptureReady: () => Promise<void>;
+  readonly #usb: UsbTransport;
+  readonly #wifi: WifiTransport;
 
   // missingCharacter runs whenever a connected device reports that no pack is installed.
   // buttonPressed runs one time for each press of the device's BOOT button.
-  constructor(missingCharacter: () => void = () => undefined, buttonPressed: () => void = () => undefined) {
+  constructor(
+      missingCharacter: () => void = () => undefined,
+      buttonPressed: () => void = () => undefined,
+      voiceCaptureReady: () => Promise<void> = async () => undefined) {
     this.#missing = missingCharacter;
     this.#button = buttonPressed;
+    this.#voiceCaptureReady = voiceCaptureReady;
+    const voiceReady = () => void this.#notifyVoiceCaptureReady();
+    this.#usb = new UsbTransport(
+      () => this.#route(), presses => this.#pressed(presses), {voiceCaptureReady: voiceReady});
+    this.#wifi = new WifiTransport(
+      () => this.#route(), presses => this.#pressed(presses), voiceReady);
   }
 
   get state(): CharacterState {
@@ -75,6 +87,29 @@ export class DeviceTransport {
 
   get orientation(): DeviceOrientation | null {
     return this.#usb.connected ? this.#usb.orientation : this.#wifi.orientation;
+  }
+
+  get capabilities(): DeviceCapabilities {
+    if (this.#usb.connected) return this.#usb.capabilities;
+    if (this.#wifi.connected) return this.#wifi.capabilities;
+    return {speaker: false, microphone: false};
+  }
+
+  captureVoice(): Promise<VoiceCapture> {
+    if (this.#usb.connected) return this.#usb.captureVoice();
+    if (this.#wifi.connected) return this.#wifi.captureVoice();
+    throw new Error('Connect the Agent Companion first.');
+  }
+
+  playVoice(pcm: Buffer, sampleRate?: number, signal?: AbortSignal): Promise<void> {
+    if (this.#usb.connected) return this.#usb.playVoice(pcm, sampleRate, signal);
+    if (this.#wifi.connected) return this.#wifi.playVoice(pcm, sampleRate, signal);
+    throw new Error('Connect the Agent Companion first.');
+  }
+
+  async cancelVoice(): Promise<void> {
+    if (this.#usb.connected) await this.#usb.cancelVoice();
+    else if (this.#wifi.connected) await this.#wifi.cancelVoice();
   }
 
   async setOrientationOffset(offsetDegrees: number): Promise<DeviceOrientation> {
@@ -230,6 +265,24 @@ export class DeviceTransport {
     this.#lastPress = {presses, at: now};
     console.log(`[device] BOOT button pressed (${presses} since the device started)`);
     this.#button();
+  }
+
+  async #notifyVoiceCaptureReady(): Promise<void> {
+    if (this.#voiceNotificationActive) return;
+    this.#voiceNotificationActive = true;
+    try {
+      await this.#voiceCaptureReady();
+    } catch (error) {
+      try {
+        await this.cancelVoice();
+      } catch (cancelError) {
+        console.error(`[voice] Device cleanup failed: ${
+          cancelError instanceof Error ? cancelError.message : String(cancelError)}`);
+      }
+      console.error(`[voice] ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.#voiceNotificationActive = false;
+    }
   }
 
   #route(): void {

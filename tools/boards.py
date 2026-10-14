@@ -21,7 +21,7 @@ BOARD_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DEFINE = re.compile(r"^AGENT_BOARD_[A-Z0-9_]+$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 REQUIRED = ("name", "define", "directory", "chip", "flash_size", "partitions",
-            "flash", "fqbn", "vendor")
+            "flash", "fqbn", "serial_baud", "vendor")
 
 
 def load(path=BOARDS):
@@ -58,6 +58,8 @@ def validate(data, sources=BOARD_SOURCES, root=ROOT):
         if (not isinstance(board["flash_size"], str)
                 or not re.fullmatch(r"[1-9][0-9]*MB", board["flash_size"])):
             raise ValueError(f"Board {board_id} flash_size must be expressed in MB.")
+        if not isinstance(board["serial_baud"], int) or board["serial_baud"] <= 0:
+            raise ValueError(f"Board {board_id} serial_baud must be a positive integer.")
         flash = board["flash"]
         try:
             offsets = [int(flash[key], 0) for key in
@@ -131,7 +133,7 @@ def main(argv=None):
     sub.add_parser("validate", help="check boards.json against the firmware sources")
     field = sub.add_parser("field", help="print one board field")
     field.add_argument("name", choices=("id", "name", "models", "define", "directory", "chip",
-                                        "flash_size", "partitions", "fqbn"))
+                                        "flash_size", "partitions", "fqbn", "serial_baud"))
     field.add_argument("--board")
     for name, help_text in (
         ("vendor-dir", "print the vendor directory for this computer"),

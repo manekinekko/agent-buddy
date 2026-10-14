@@ -14,12 +14,48 @@ import {defaultAgentContext, normalizeAgentHook, otherAgentLocations} from './ag
 import {loadAgentBadgeIcons} from './agent-badges.js';
 import {desktopBackdrops, isDesktopBackdrop, isDesktopVolume} from './display-settings.js';
 import {isUsageWindow, usageWindows} from './usage-tracker.js';
+import {LocalVoiceService} from './local-voice-service.js';
 
 const autoInstallRetryMs = 5 * 60 * 1000;
+const voiceLevelWindowSamples = 1600;
+
+function voiceCaptureLevels(pcm: Buffer): {
+  mean: number;
+  minimumWindow: number;
+  maximumWindow: number;
+  peak: number;
+} {
+  const samples = Math.floor(pcm.length / 2);
+  if (!samples) return {mean: 0, minimumWindow: 0, maximumWindow: 0, peak: 0};
+  let total = 0;
+  let peak = 0;
+  let minimumWindow = Number.MAX_SAFE_INTEGER;
+  let maximumWindow = 0;
+  for (let start = 0; start < samples; start += voiceLevelWindowSamples) {
+    const end = Math.min(samples, start + voiceLevelWindowSamples);
+    let windowTotal = 0;
+    for (let index = start; index < end; ++index) {
+      const value = Math.abs(pcm.readInt16LE(index * 2));
+      windowTotal += value;
+      peak = Math.max(peak, value);
+    }
+    const windowMean = Math.round(windowTotal / (end - start));
+    minimumWindow = Math.min(minimumWindow, windowMean);
+    maximumWindow = Math.max(maximumWindow, windowMean);
+    total += windowTotal;
+  }
+  return {
+    mean: Math.round(total / samples),
+    minimumWindow,
+    maximumWindow,
+    peak,
+  };
+}
 
 export async function runDaemon(): Promise<void> {
   let lastAutoInstall = 0;
   let service: CompanionService | undefined;
+  let voice: LocalVoiceService | undefined;
   // A device that lost its pack (for example, an interrupted install) gets the preferred one back.
   let settingsUrl: string | null = null;
   // A stop on request has ended: this service runs again.
@@ -30,7 +66,25 @@ export async function runDaemon(): Promise<void> {
     lastAutoInstall = Date.now();
     service.restoreCharacter().catch(error => console.error(`[character] automatic install failed: ${
       error instanceof Error ? error.message : String(error)}`));
-  }, () => void service?.openSettings(settingsUrl));
+  }, () => void service?.openSettings(settingsUrl), async () => {
+    if (!transport.capabilities.microphone) return;
+    if (!voice?.snapshot().config.enabled) {
+      await transport.cancelVoice();
+      return;
+    }
+    const turnStarted = performance.now();
+    const acknowledgmentPlayed = await voice.acknowledge();
+    console.log(`[voice] release-to-acknowledgment-complete: ${
+      Math.round(performance.now() - turnStarted)} ms`);
+    const captureStarted = performance.now();
+    const capture = await transport.captureVoice();
+    console.log(`[voice] capture transfer: ${Math.round(performance.now() - captureStarted)} ms`);
+    const levels = voiceCaptureLevels(capture.pcm);
+    console.log(`[voice] capture levels: mean=${levels.mean} min_100ms=${
+      levels.minimumWindow} max_100ms=${levels.maximumWindow} peak=${levels.peak}`);
+    await voice.processCapture(capture.pcm, capture.sampleRate, {acknowledgmentPlayed});
+    console.log(`[voice] release-to-complete: ${Math.round(performance.now() - turnStarted)} ms`);
+  });
   const store = new StateStore(statePath());
   const restored = await store.load();
   const agentContext = defaultAgentContext();
@@ -46,6 +100,14 @@ export async function runDaemon(): Promise<void> {
     },
   });
   service = new CompanionService(transport, coordinator, agentContext, badgeIcons);
+  voice = await LocalVoiceService.create({
+    log: message => console.log(`[voice] ${message}`),
+    playPcm: async (pcm, sampleRate, signal) => {
+      if (!transport.capabilities.speaker)
+        throw new Error('The connected device does not have a speaker.');
+      await transport.playVoice(pcm, sampleRate, signal);
+    },
+  });
   // Picks up characters added or changed since the last run before anyone opens the settings page.
   void service.refreshCharacterPacks();
   await service.refreshWifiPairing();
@@ -79,9 +141,10 @@ export async function runDaemon(): Promise<void> {
   const preparingUsb = !setup.completed && setup.port && setup.display !== 'desktop' && !setup.deviceDeferred;
   await transport.start(preparingUsb ? 'auto' : connectionMode, service.deviceEnabled, preparingUsb ? setup.port : null);
   console.log(`[daemon] listening ${path}`);
-  settingsUrl = await startSettingsServer(companion);
+  settingsUrl = await startSettingsServer(companion, voice);
 
   const shutdown = async () => {
+    voice?.cancel();
     companion.stopUsage();
     coordinator.close();
     await store.flush(coordinator.snapshot());

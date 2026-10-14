@@ -10,6 +10,7 @@
 namespace copilot {
 namespace {
 const char* error = nullptr;
+TouchContact contact;
 #ifdef ARDUINO_ARCH_ESP32
 board::TouchController controller;
 TouchGestureTracker tracker;
@@ -102,15 +103,20 @@ bool pollTouchGesture(TouchGesture& gesture) {
     const int16_t viewportY = y[0] - kDisplayOffsetY;
     if (viewportX < 0 || viewportY < 0
         || viewportX >= kDisplaySize || viewportY >= kDisplaySize) {
+      contact.pressed = false;
       return tracker.sample(false, 0, 0, now, gesture);
     }
     int16_t transformedX, transformedY;
     if (!ScreenOrientation::panelToContent(
             touchRotation, kDisplaySize, viewportX, viewportY, transformedX, transformedY)) {
+      contact.pressed = false;
       return tracker.sample(false, 0, 0, now, gesture);
     }
     x[0] = transformedX;
     y[0] = transformedY;
+    contact = {true, x[0], y[0]};
+  } else {
+    contact.pressed = false;
   }
   return tracker.sample(count != 0, x[0], y[0], now, gesture);
 #else
@@ -118,5 +124,9 @@ bool pollTouchGesture(TouchGesture& gesture) {
   error = "Physical touch input requires the ESP32 device.";
   return false;
 #endif
+}
+
+TouchContact currentTouchContact() {
+  return contact;
 }
 }

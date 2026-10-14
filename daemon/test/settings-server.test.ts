@@ -7,6 +7,8 @@ import {createSettingsServer} from '../src/settings-server.js';
 import {initialOnboarding, SetupError, type OnboardingChange, type OnboardingStep} from '../src/onboarding.js';
 import {isHookCurrent} from '../src/agents/hook-config.js';
 import type {AgentId, HookStatus} from '../src/agents/types.js';
+import {LocalVoiceError} from '../src/local-voice-service.js';
+import type {LocalVoiceStatus} from '../src/protocol.js';
 
 const token = 'a'.repeat(48);
 
@@ -194,11 +196,73 @@ class FakeService extends EventEmitter {
   }
 }
 
-async function withServer(run: (call: Call, service: FakeService) => Promise<void>): Promise<void> {
+class FakeVoice {
+  updates: unknown[] = [];
+  resets = 0;
+  cancellations = 0;
+  tests: Array<string | undefined> = [];
+  value: LocalVoiceStatus = {
+    config: {
+      enabled: true,
+      whisperExecutable: '',
+      whisperModelPath: '/voice/models/ggml-base.bin',
+      ttsVoice: 'Samantha',
+      ttsRate: 190,
+      maxRecordingSeconds: 30,
+      allowAllTools: true,
+      sessionId: '11111111-1111-4111-8111-111111111111',
+    },
+    state: 'idle',
+    active: false,
+    ready: true,
+    sttReady: true,
+    ttsReady: true,
+    copilotReady: true,
+    dependencies: {
+      whisper: {available: true, path: '/whisper', message: 'ready', guidance: 'ready'},
+      model: {available: true, path: '/model', message: 'ready', guidance: 'ready'},
+      say: {available: true, path: '/usr/bin/say', message: 'ready', guidance: 'ready'},
+      ffmpeg: {available: true, path: '/ffmpeg', message: 'ready', guidance: 'ready'},
+      copilot: {available: true, path: '/copilot', message: 'ready', guidance: 'ready'},
+    },
+    lastError: null,
+    configurationWarning: null,
+  };
+  snapshot() {
+    return structuredClone(this.value);
+  }
+  async getStatus() {
+    return this.snapshot();
+  }
+  async updateConfig(value: unknown) {
+    if (!value || typeof value !== 'object' || (value as {ttsRate?: unknown}).ttsRate === 'fast')
+      throw new LocalVoiceError('Invalid voice settings.', 400);
+    this.updates.push(value);
+    this.value.config = {...this.value.config, ...(value as Partial<LocalVoiceStatus['config']>)};
+    return this.snapshot();
+  }
+  async resetSession() {
+    this.resets += 1;
+    this.value.config.sessionId = '22222222-2222-4222-8222-222222222222';
+    return this.snapshot();
+  }
+  cancel() {
+    this.cancellations += 1;
+    return true;
+  }
+  async testTts(text?: string) {
+    this.tests.push(text);
+    return {playbackBytes: 48_000, status: this.snapshot()};
+  }
+}
+
+async function withServer(
+    run: (call: Call, service: FakeService) => Promise<void>, voice?: FakeVoice): Promise<void> {
   const port = await freePort();
   const service = new FakeService();
   const server = createSettingsServer({
     service: service as never, port, token,
+    voice: voice as never,
     thumbnail: async id => id === 'copilot' ? Buffer.from('png') : null,
     previewPack: async id => Buffer.from(`pack:${id}`),
   });
@@ -235,6 +299,51 @@ async function withServer(run: (call: Call, service: FakeService) => Promise<voi
 type Call = (path: string, options?: {
   method?: string; host?: string; token?: string | false; headers?: Record<string, string>; body?: string | Buffer;
 }) => Promise<{status: number; headers: Record<string, string | string[] | undefined>; body: string}>;
+
+test('voice settings APIs expose status, update settings, reset, cancel and test TTS', async () => {
+  const voice = new FakeVoice();
+  await withServer(async call => {
+    const json = {'Content-Type': 'application/json'};
+    assert.equal((await call('/api/voice', {token: false})).status, 401);
+    const status = JSON.parse((await call('/api/status')).body) as {voice: LocalVoiceStatus};
+    assert.equal(status.voice.config.sessionId, voice.value.config.sessionId);
+    assert.equal(JSON.parse((await call('/api/voice')).body).ready, true);
+    assert.equal((await call('/api/voice', {method: 'POST', body: '{}'})).status, 415);
+    assert.equal((await call('/api/voice', {
+      method: 'POST', headers: json, body: '{"ttsRate":"fast"}',
+    })).status, 400);
+    const update = await call('/api/voice', {
+      method: 'POST', headers: json, body: '{"enabled":false,"ttsRate":205}',
+    });
+    assert.equal(update.status, 200);
+    assert.deepEqual(voice.updates, [{enabled: false, ttsRate: 205}]);
+    assert.equal(JSON.parse(update.body).voice.config.enabled, false);
+
+    const reset = await call('/api/voice/session/reset', {method: 'POST'});
+    assert.equal(reset.status, 200);
+    assert.equal(JSON.parse(reset.body).voice.config.sessionId, '22222222-2222-4222-8222-222222222222');
+    assert.equal(voice.resets, 1);
+
+    const cancel = await call('/api/voice/cancel', {method: 'POST'});
+    assert.equal(cancel.status, 200);
+    assert.equal(JSON.parse(cancel.body).cancelled, true);
+    assert.equal(voice.cancellations, 1);
+
+    assert.equal((await call('/api/voice/tts-test', {
+      method: 'POST', headers: json, body: '{"text":42}',
+    })).status, 400);
+    const tts = await call('/api/voice/tts-test', {
+      method: 'POST', headers: json, body: '{"text":"Testing one two"}',
+    });
+    assert.equal(tts.status, 200);
+    assert.equal(JSON.parse(tts.body).playbackBytes, 48_000);
+    assert.deepEqual(voice.tests, ['Testing one two']);
+  }, voice);
+
+  await withServer(async call => {
+    assert.equal((await call('/api/voice')).status, 404);
+  });
+});
 
 test('onboarding hook APIs allow checks without consent and restrict installations to approved agents', async () => {
   await withServer(async (call, service) => {

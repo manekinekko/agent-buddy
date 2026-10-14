@@ -76,6 +76,54 @@ export interface DaemonStatus {
   // The Wi-Fi network the device is set up for, as the device reports it. Never stored.
   network?: DeviceNetwork | null;
   orientation?: DeviceOrientation | null;
+  capabilities?: DeviceCapabilities;
+  voice?: LocalVoiceStatus;
+}
+
+export interface DeviceCapabilities {
+  microphone: boolean;
+  speaker: boolean;
+}
+
+export interface LocalVoiceConfig {
+  enabled: boolean;
+  whisperExecutable: string;
+  whisperModelPath: string;
+  ttsVoice: string;
+  ttsRate: number;
+  maxRecordingSeconds: number;
+  allowAllTools: boolean;
+  sessionId: string;
+}
+
+export type LocalVoiceState = 'idle' | 'transcribing' | 'thinking' | 'speaking' | 'testing' | 'canceling' | 'error';
+
+export interface VoiceDependencyStatus {
+  available: boolean;
+  path: string | null;
+  message: string;
+  guidance: string;
+}
+
+export interface VoiceDependencies {
+  whisper: VoiceDependencyStatus;
+  model: VoiceDependencyStatus;
+  say: VoiceDependencyStatus;
+  ffmpeg: VoiceDependencyStatus;
+  copilot: VoiceDependencyStatus;
+}
+
+export interface LocalVoiceStatus {
+  config: LocalVoiceConfig;
+  state: LocalVoiceState;
+  active: boolean;
+  ready: boolean;
+  sttReady: boolean;
+  ttsReady: boolean;
+  copilotReady: boolean;
+  dependencies: VoiceDependencies;
+  lastError: string | null;
+  configurationWarning: string | null;
 }
 
 export interface DeviceNetwork {

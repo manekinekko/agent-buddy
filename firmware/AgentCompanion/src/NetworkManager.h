@@ -20,9 +20,20 @@ class NetworkManager {
     int16_t (*offset)();
     const char* (*configure)(int16_t tenths);
   };
+  struct VoiceControl {
+    const uint8_t* (*capture)(size_t& bytes, unsigned& sampleRate, uint32_t& id);
+    bool (*consumeCapture)(uint32_t id);
+    const char* (*beginPlayback)(size_t bytes, unsigned sampleRate);
+    const char* (*writePlayback)(const uint8_t* data, size_t bytes);
+    const char* (*finishPlayback)();
+    void (*abortPlayback)();
+    bool (*cancel)();
+    const char* (*state)();
+  };
 
   void begin(CommandHandler commandHandler, const CharacterUpload* upload,
-             BadgeHandler badgeHandler = nullptr, const OrientationControl* orientation = nullptr);
+             BadgeHandler badgeHandler = nullptr, const OrientationControl* orientation = nullptr,
+             const VoiceControl* voice = nullptr);
   void update();
   bool startSetup();
   bool configure(const char* name, const char* password);
@@ -69,6 +80,10 @@ class NetworkManager {
   void handleFirmwareResponse();
   void handleFirmwareApproval();
   void handleOrientation();
+  void handleVoiceCapture();
+  void handleVoicePlaybackBody();
+  void handleVoicePlaybackResponse();
+  void handleVoiceCancel();
   void confirmFirmware();
   void handleDiscovery();
   void updateConnection();
@@ -85,9 +100,13 @@ class NetworkManager {
   BadgeHandler badgeHandler_ = nullptr;
   const CharacterUpload* upload_ = nullptr;
   const OrientationControl* orientation_ = nullptr;
+  const VoiceControl* voice_ = nullptr;
   const char* uploadError_ = nullptr;
   bool uploadAuthorized_ = false;
   bool uploadStarted_ = false;
+  const char* voicePlaybackError_ = nullptr;
+  bool voicePlaybackAuthorized_ = false;
+  bool voicePlaybackStarted_ = false;
   const char* firmwareError_ = nullptr;
   bool firmwareAuthorized_ = false;
   bool firmwareStarted_ = false;

@@ -14,6 +14,14 @@ import {
 } from './agent-badges.js';
 import {shouldSendUsage, usagePacket} from './usage-tracker.js';
 import {discoverWifiDevices, loadWifiConfig, type WifiConfig} from './wifi-config.js';
+import {
+  parseWifiCapabilities,
+  voiceMaximumCaptureBytes,
+  voicePlaybackSampleRate,
+  voiceProtocol,
+  type DeviceCapabilities,
+  type VoiceCapture,
+} from './voice-audio.js';
 
 const uploadChunkBytes = 16 * 1024;
 const uploadIdleTimeoutMs = 30000;
@@ -79,13 +87,20 @@ export class WifiTransport {
   #ssidBase64: string | undefined;
   #installing = false;
   #buttons: ButtonCount | null = null;
+  #capabilities: DeviceCapabilities = {speaker: false, microphone: false};
+  #voiceReady = false;
   readonly #changed: () => void;
   readonly #button: (presses: number) => void;
+  readonly #voiceCaptureReady: () => void;
 
   // `button` runs when the device's BOOT button count goes up, with the count since the device started.
-  constructor(changed: () => void = () => undefined, button: (presses: number) => void = () => undefined) {
+  constructor(
+      changed: () => void = () => undefined,
+      button: (presses: number) => void = () => undefined,
+      voiceCaptureReady: () => void = () => undefined) {
     this.#changed = changed;
     this.#button = button;
+    this.#voiceCaptureReady = voiceCaptureReady;
   }
 
   get connected(): boolean {
@@ -111,6 +126,10 @@ export class WifiTransport {
 
   get adaptivePatchRam(): boolean {
     return this.#connected && this.#adaptivePatchRam;
+  }
+
+  get capabilities(): DeviceCapabilities {
+    return this.#connected ? this.#capabilities : {speaker: false, microphone: false};
   }
 
   // Reachable over Wi-Fi means the device is on this network right now.
@@ -197,7 +216,7 @@ export class WifiTransport {
       const status = await response.json() as {deviceId?: string; boot?: number; character?: string; protocol?: number;
                                                patchRam?: string; ssidBase64?: string; firmware?: string;
                                                buttonPresses?: number; orientationOffsetTenths?: unknown;
-                                               board?: unknown};
+                                               board?: unknown; capabilities?: unknown; voiceState?: unknown};
       if (status.deviceId?.toLowerCase() !== this.#config.deviceId.toLowerCase()) return false;
       if (!Number.isInteger(status.boot) || Number(status.boot) < 0) return false;
       const protocol = Number.isInteger(status.protocol) ? Number(status.protocol) : 0;
@@ -217,6 +236,11 @@ export class WifiTransport {
         ? status.firmware : null;
       this.#ssidBase64 = typeof status.ssidBase64 === 'string' ? status.ssidBase64 : undefined;
       this.#board = deviceBoard(status.board);
+      this.#capabilities = protocol >= voiceProtocol
+        ? parseWifiCapabilities(status.capabilities) : {speaker: false, microphone: false};
+      const voiceReady = status.voiceState === 'ready';
+      if (voiceReady && !this.#voiceReady) this.#voiceCaptureReady();
+      this.#voiceReady = voiceReady;
       const needsSync = !this.#connected || endpoint !== this.#endpoint || status.boot !== this.#boot;
       // Protocol 10 and later count BOOT button presses.
       if (Number.isInteger(status.buttonPresses) && Number(status.buttonPresses) >= 0) {
@@ -244,6 +268,71 @@ export class WifiTransport {
 
   async installCharacter(pack: Buffer, progress: InstallProgress = () => undefined): Promise<string> {
     return parseUploadResponse(await this.#upload('/character', pack, {}, progress));
+  }
+
+  captureVoice(): Promise<VoiceCapture> {
+    const operation = this.#commands.then(async () => {
+      this.#assertVoiceAvailable('microphone');
+      const response = await fetch(`${this.#endpoint}/voice/capture`, {
+        headers: {Authorization: `Bearer ${this.#config!.token}`},
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!response.ok)
+        throw new Error(`Device microphone capture failed: ${await response.text()}`);
+      const sampleRate = Number(response.headers.get('x-sample-rate'));
+      const format = response.headers.get('x-audio-format');
+      const pcm = Buffer.from(await response.arrayBuffer());
+      if (sampleRate !== 16000 || format !== 's16le-mono'
+          || pcm.length === 0 || pcm.length > voiceMaximumCaptureBytes || pcm.length % 2)
+        throw new Error('Device returned invalid microphone audio.');
+      this.#voiceReady = false;
+      return {pcm, sampleRate};
+    });
+    this.#commands = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  playVoice(
+      pcm: Buffer, sampleRate = voicePlaybackSampleRate, signal?: AbortSignal): Promise<void> {
+    const operation = this.#commands.then(async () => {
+      this.#assertVoiceAvailable('speaker');
+      if (sampleRate !== voicePlaybackSampleRate || pcm.length === 0 || pcm.length % 2)
+        throw new Error(`Voice playback must be non-empty ${voicePlaybackSampleRate} Hz mono signed 16-bit PCM.`);
+      const response = await fetch(`${this.#endpoint}/voice/playback`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.#config!.token}`,
+          'Content-Type': 'application/octet-stream',
+          'X-Sample-Rate': String(sampleRate),
+        },
+        body: new Uint8Array(pcm),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(60_000)])
+          : AbortSignal.timeout(60_000),
+      });
+      if (!response.ok)
+        throw new Error(`Device speaker playback failed: ${await response.text()}`);
+    });
+    this.#commands = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  cancelVoice(): Promise<void> {
+    const operation = this.#commands.then(async () => {
+      if (!this.#connected || this.#protocol < voiceProtocol) return;
+      const response = await this.#postBadge('/voice/cancel', '');
+      if (!response.ok)
+        throw new Error(`Device could not cancel voice audio: ${await response.text()}`);
+    });
+    this.#commands = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  #assertVoiceAvailable(capability: keyof DeviceCapabilities): void {
+    if (!this.#connected || !this.#config || !this.#endpoint)
+      throw new Error('Connect the Agent Companion first.');
+    if (this.#protocol < voiceProtocol || !this.#capabilities[capability])
+      throw new Error(`The connected device does not support ${capability} audio.`);
   }
 
   async setOrientationOffset(offsetDegrees: number): Promise<DeviceOrientation> {
@@ -408,7 +497,9 @@ export class WifiTransport {
       });
   }
 
-  async #postBadge(path: '/icon' | '/agents' | '/usage' | '/orientation', body: string): Promise<Response> {
+  async #postBadge(
+      path: '/icon' | '/agents' | '/usage' | '/orientation' | '/voice/cancel',
+      body: string): Promise<Response> {
     if (!this.#config || !this.#endpoint) throw new Error('The Wi-Fi device is not connected.');
     const response = await fetch(`${this.#endpoint}${path}`, {
       method: 'POST',
@@ -416,8 +507,10 @@ export class WifiTransport {
       body,
       signal: AbortSignal.timeout(5000),
     });
-    if (!response.ok) throw new Error(`Device rejected ${path === '/orientation'
-      ? 'orientation settings' : 'badge packet'}: ${await response.text()}`);
+    if (!response.ok) throw new Error(`Device rejected ${
+      path === '/orientation' ? 'orientation settings'
+      : path === '/voice/cancel' ? 'voice cancellation'
+      : 'badge packet'}: ${await response.text()}`);
     return response;
   }
 
@@ -430,6 +523,8 @@ export class WifiTransport {
     if (!connected) this.#buttons = null;
     if (!connected) {
       this.#protocol = 0;
+      this.#capabilities = {speaker: false, microphone: false};
+      this.#voiceReady = false;
       this.#iconSignature = '';
       this.#activeSignature = '';
       this.#usageSignature = null;

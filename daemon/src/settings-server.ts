@@ -12,6 +12,7 @@ import {isAgentId} from './agents/types.js';
 import {isUsageWindow, usageWindows} from './usage-tracker.js';
 import {isOrientationOffset} from './orientation-settings.js';
 import {isOnboardingChange, isOnboardingStep, SetupError} from './onboarding.js';
+import {LocalVoiceError, type LocalVoiceController} from './local-voice-service.js';
 
 export const defaultSettingsPort = 4667;
 const maxJsonBytes = 64 * 1024;
@@ -49,6 +50,7 @@ export interface SettingsServerOptions {
     | 'setupOnboardingDevice' | 'finishOnboarding' | 'removeOnboardingAgent' | 'rescanAgents' | 'on' | 'off'>;
   port: number;
   token: string;
+  voice?: LocalVoiceController;
   webDirectory?: string;
   thumbnail?: (id: string) => Promise<Buffer | null>;
   previewPack?: (id: string) => Promise<Buffer>;
@@ -125,7 +127,31 @@ export function createSettingsServer(options: SettingsServerOptions): Server {
     if (!authorized(request, url, readable)) throw new HttpError(401, 'Missing or invalid session token.');
 
     if (method === 'GET' && segments.length === 1 && segments[0] === 'status') {
-      return json(response, 200, service.status());
+      return json(response, 200, settingsStatus(service, options.voice));
+    }
+    if (segments[0] === 'voice') {
+      const voice = options.voice;
+      if (!voice) throw new HttpError(404, 'Local voice service is not available.');
+      if (method === 'GET' && segments.length === 1)
+        return json(response, 200, await voice.getStatus());
+      if (method === 'POST' && segments.length === 1) {
+        const settings = await voice.updateConfig(await readJson(request));
+        return json(response, 200, {ok: true, voice: settings});
+      }
+      if (method === 'POST' && segments.length === 2 && segments[1] === 'cancel') {
+        const cancelled = voice.cancel();
+        return json(response, 200, {ok: true, cancelled, voice: voice.snapshot()});
+      }
+      if (method === 'POST' && segments.length === 2 && segments[1] === 'tts-test') {
+        const body = await readJson(request) as {text?: unknown};
+        if (body.text !== undefined && typeof body.text !== 'string')
+          throw new HttpError(400, 'TTS test text must be a string.');
+        const result = await voice.testTts(body.text);
+        return json(response, 200, {ok: true, playbackBytes: result.playbackBytes, voice: result.status});
+      }
+      if (method === 'POST' && segments.length === 3 && segments[1] === 'session' && segments[2] === 'reset') {
+        return json(response, 200, {ok: true, voice: await voice.resetSession()});
+      }
     }
     if (segments[0] === 'onboarding') {
       if (method === 'GET' && segments.length === 1) return json(response, 200, service.onboardingStatus());
@@ -214,7 +240,7 @@ export function createSettingsServer(options: SettingsServerOptions): Server {
       }
     }
     if (method === 'GET' && segments.length === 1 && segments[0] === 'events') {
-      return streamEvents(request, response, service);
+      return streamEvents(request, response, service, options.voice);
     }
     if (segments[0] === 'characters') {
       const id = segments[1];
@@ -397,7 +423,8 @@ export function createSettingsServer(options: SettingsServerOptions): Server {
         response.destroy();
         return;
       }
-      const status = error instanceof HttpError || error instanceof SetupError ? error.status : 400;
+      const status = error instanceof HttpError || error instanceof SetupError || error instanceof LocalVoiceError
+        ? error.status : 400;
       // An error can leave an unread request body behind, so don't reuse the connection.
       response.setHeader('Connection', 'close');
       response.on('finish', () => request.socket.destroy());
@@ -450,12 +477,18 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   }
 }
 
+function settingsStatus(
+    service: SettingsServerOptions['service'], voice: LocalVoiceController | undefined): ReturnType<typeof service.status> {
+  const status = service.status();
+  return voice ? {...status, voice: voice.snapshot()} : status;
+}
+
 function streamEvents(request: IncomingMessage, response: ServerResponse,
-                      service: SettingsServerOptions['service']): void {
+                      service: SettingsServerOptions['service'], voice?: LocalVoiceController): void {
   response.writeHead(200, {...securityHeaders, 'Content-Type': 'text/event-stream', Connection: 'keep-alive'});
   let previous = '';
   const send = () => {
-    const status = JSON.stringify(service.status());
+    const status = JSON.stringify(settingsStatus(service, voice));
     if (status === previous) return;
     previous = status;
     response.write(`event: status\ndata: ${status}\n\n`);
@@ -480,11 +513,12 @@ async function savedSettingsToken(): Promise<string | null> {
   }
 }
 
-export async function startSettingsServer(service: SettingsServerOptions['service']): Promise<string | null> {
+export async function startSettingsServer(
+    service: SettingsServerOptions['service'], voice?: LocalVoiceController): Promise<string | null> {
   const port = Number(process.env.AGENT_COMPANION_SETTINGS_PORT ?? defaultSettingsPort);
   // Reusing the private token keeps open settings tabs and saved links working across daemon restarts.
   const token = await savedSettingsToken() ?? randomBytes(24).toString('hex');
-  const server = createSettingsServer({service, port, token});
+  const server = createSettingsServer({service, port, token, voice});
   try {
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);

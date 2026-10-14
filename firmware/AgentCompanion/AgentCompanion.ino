@@ -23,6 +23,8 @@
 #include "src/Deadline.h"
 #include "src/DeviceCommands.h"
 #include "src/TouchInput.h"
+#include "src/VoiceUi.h"
+#include "src/Rgb565.h"
 #include "src/ButtonInput.h"
 #include "src/SettingsMenu.h"
 #include "src/Motion.h"
@@ -49,6 +51,10 @@ constexpr size_t kTransferBytes = 16 * 1024;
 static_assert(kCharacterUploadChunkBytes <= kTransferBytes,
               "Character upload chunks are staged in the display transfer buffer.");
 uint8_t* transferBuffer;
+uint16_t* voiceOverlayScratch;
+uint8_t* wifiVoicePlayback;
+size_t wifiVoicePlaybackBytes = 0;
+size_t wifiVoicePlaybackReceived = 0;
 std::atomic<uint32_t> droppedLogs{0};
 // The render task reads the memory-mapped pack; installation pauses it before erasing flash.
 portMUX_TYPE renderLock = portMUX_INITIALIZER_UNLOCKED;
@@ -75,9 +81,10 @@ constexpr char kPreferencesNamespace[] = "agent-companion";
 constexpr char kSoundPreference[] = "sound";
 constexpr char kSoundVolumePreference[] = "volume";
 constexpr char kOrientationPreference[] = "orient-offset";
+VoicePushToTalkTracker voicePushToTalk;
 
 void logMessage(const char* format, ...) {
-  char message[384];
+  char message[512];
   va_list arguments;
   va_start(arguments, format);
   const int length = vsnprintf(message, sizeof(message), format, arguments);
@@ -242,6 +249,162 @@ bool captureFrame(const Frame& frame) {
   return writeCapture(reinterpret_cast<const uint8_t*>(header), length)
       && writeCapture(reinterpret_cast<const uint8_t*>(frame.pixels), bytes)
       && writeCapture(reinterpret_cast<const uint8_t*>(end), sizeof(end) - 1);
+}
+
+bool sendVoiceCapture() {
+  if constexpr (!kHasMicrophone) {
+    logMessage("VOICE_ERROR capture=unsupported\n");
+    return false;
+  }
+  const VoiceCaptureInfo capture = voiceCaptureInfo();
+  if (!capture.data || !capture.bytes) {
+    logMessage("VOICE_ERROR capture=not-ready state=%s\n", voiceAudioStateName());
+    return false;
+  }
+  char header[144];
+  const int length = snprintf(
+      header, sizeof(header),
+      "VOICE_PCM id=%u bytes=%u sample_rate=%u channels=1 format=s16le\n",
+      static_cast<unsigned>(capture.id), static_cast<unsigned>(capture.bytes),
+      capture.sampleRate);
+  char trailer[64];
+  const int trailerLength = snprintf(
+      trailer, sizeof(trailer), "\nVOICE_PCM_END id=%u\n", static_cast<unsigned>(capture.id));
+  captureInterrupted = true;
+  const bool sent = length > 0 && static_cast<size_t>(length) < sizeof(header)
+      && trailerLength > 0 && static_cast<size_t>(trailerLength) < sizeof(trailer)
+      && writeCapture(reinterpret_cast<const uint8_t*>(header), length)
+      && writeCapture(capture.data, capture.bytes)
+      && writeCapture(reinterpret_cast<const uint8_t*>(trailer), trailerLength);
+  if (sent) consumeVoiceCapture(capture.id);
+  return sent;
+}
+
+void receiveVoicePlayback(const char* payload) {
+  if constexpr (!kHasSpeaker) {
+    logMessage("VOICE_ERROR playback=unsupported\n");
+    return;
+  }
+  const VoiceAudioState state = voiceAudioState();
+  if (!canQueueVoicePlayback(state)) {
+    logMessage("VOICE_ERROR playback=microphone-busy\n");
+    return;
+  }
+  VoicePlaybackPacket packet;
+  if (!parseVoicePlaybackPacket(payload, packet) || packet.sampleRate != kAudioSampleRate
+      || packet.bytes > kVoiceMaximumPlaybackBytes || packet.bytes % sizeof(int16_t)) {
+    logMessage("VOICE_ERROR playback=invalid-packet\n");
+    return;
+  }
+  auto* pcm = static_cast<uint8_t*>(
+      heap_caps_malloc(packet.bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!pcm) {
+    logMessage("VOICE_ERROR playback=allocation\n");
+    return;
+  }
+  logMessage("VOICE_PLAY_READY bytes=%u sample_rate=%u chunk=%u\n",
+             static_cast<unsigned>(packet.bytes), packet.sampleRate,
+             static_cast<unsigned>(kVoiceTransferChunkBytes));
+  Serial.setTimeout(2000);
+  size_t received = 0;
+  while (received < packet.bytes) {
+    const size_t expected = std::min<size_t>(kVoiceTransferChunkBytes, packet.bytes - received);
+    size_t buffered = 0;
+    const uint32_t started = millis();
+    while (buffered < expected && millis() - started < 5000) {
+      buffered += Serial.readBytes(
+          reinterpret_cast<char*>(pcm + received + buffered), expected - buffered);
+    }
+    if (buffered != expected) {
+      heap_caps_free(pcm);
+      logMessage("VOICE_ERROR playback=transfer-timeout received=%u\n",
+                 static_cast<unsigned>(received + buffered));
+      return;
+    }
+    received += buffered;
+    logMessage("VOICE_PLAY_ACK received=%u total=%u\n",
+               static_cast<unsigned>(received), static_cast<unsigned>(packet.bytes));
+  }
+  if (!queueVoicePlayback(pcm, packet.bytes, packet.sampleRate)) {
+    heap_caps_free(pcm);
+    logMessage("VOICE_ERROR playback=queue\n");
+    return;
+  }
+  logMessage("VOICE_PLAY_QUEUED bytes=%u sample_rate=%u\n",
+             static_cast<unsigned>(packet.bytes), packet.sampleRate);
+}
+
+void cancelVoice() {
+  bool cancelled = cancelVoiceCapture();
+  cancelled = cancelVoicePlayback() || cancelled;
+  logMessage(cancelled ? "VOICE_CANCELLED\n" : "VOICE_ERROR cancel=nothing-active\n");
+}
+
+constexpr int kVoiceOverlayWidth = kVoiceButtonBounds.width;
+constexpr int kVoiceOverlayHeight = kVoiceButtonBounds.height;
+
+void renderVoiceOverlay(Frame& frame) {
+  if constexpr (!kHasMicrophone) return;
+  if (!voiceOverlayScratch) return;
+  const int left = kVoiceButtonBounds.x - kCharacterFrameX;
+  const int top = kVoiceButtonBounds.y;
+  for (int row = 0; row < kVoiceOverlayHeight; ++row)
+    std::memcpy(voiceOverlayScratch + row * kVoiceOverlayWidth,
+                frame.pixels + (top + row) * kCharacterFrameWidth + left,
+                kVoiceOverlayWidth * sizeof(uint16_t));
+
+  const VoiceAudioState state = voiceAudioState();
+  const uint16_t background = swapBytes(rgb565(21, 30, 42));
+  const uint16_t foreground = swapBytes(rgb565(242, 246, 250));
+  const uint16_t accent = swapBytes(
+      state == VoiceAudioState::Recording ? rgb565(239, 68, 68)
+      : state == VoiceAudioState::Ready ? rgb565(245, 158, 11)
+      : state == VoiceAudioState::Processing ? rgb565(139, 92, 246)
+      : state == VoiceAudioState::Playing ? rgb565(59, 130, 246)
+      : rgb565(20, 184, 166));
+  const int centerX = left + kVoiceOverlayWidth / 2;
+  const int centerY = top + kVoiceOverlayHeight / 2;
+  constexpr int kOuterRadius = kVoiceButtonSize / 2 - 1;
+  constexpr int kInnerRadius = kVoiceButtonSize / 2 - 7;
+  constexpr int kMicRadius = 10;
+  for (int y = 0; y < kVoiceOverlayHeight; ++y) {
+    for (int x = 0; x < kVoiceOverlayWidth; ++x) {
+      const int dx = x - kVoiceOverlayWidth / 2;
+      const int dy = y - kVoiceOverlayHeight / 2;
+      const int radiusSquared = dx * dx + dy * dy;
+      if (radiusSquared > kOuterRadius * kOuterRadius) continue;
+      uint16_t color = radiusSquared >= kInnerRadius * kInnerRadius ? accent : background;
+      const int absoluteX = left + x;
+      const int absoluteY = top + y;
+      const bool micBody = absoluteX >= centerX - 7 && absoluteX <= centerX + 7
+          && absoluteY >= centerY - 18 && absoluteY <= centerY + 7;
+      const bool micCap = (absoluteX - centerX) * (absoluteX - centerX)
+              + (absoluteY - (centerY - 10)) * (absoluteY - (centerY - 10))
+              <= kMicRadius * kMicRadius;
+      const bool micArc = absoluteY >= centerY + 6 && absoluteY <= centerY + 13
+          && absoluteX >= centerX - 15 && absoluteX <= centerX + 15
+          && ((absoluteX >= centerX - 15 && absoluteX <= centerX - 13)
+              || (absoluteX >= centerX + 13 && absoluteX <= centerX + 15)
+              || absoluteY >= centerY + 11);
+      const bool micStem = absoluteX >= centerX - 2 && absoluteX <= centerX + 2
+          && absoluteY >= centerY + 12 && absoluteY <= centerY + 21;
+      const bool micBase = absoluteY >= centerY + 19 && absoluteY <= centerY + 22
+          && absoluteX >= centerX - 10 && absoluteX <= centerX + 10;
+      if (micBody || micCap || micArc || micStem || micBase) color = foreground;
+      frame.pixels[absoluteY * kCharacterFrameWidth + absoluteX] = color;
+    }
+  }
+}
+
+void restoreVoiceOverlay(Frame& frame) {
+  if constexpr (!kHasMicrophone) return;
+  if (!voiceOverlayScratch) return;
+  const int left = kVoiceButtonBounds.x - kCharacterFrameX;
+  const int top = kVoiceButtonBounds.y;
+  for (int row = 0; row < kVoiceOverlayHeight; ++row)
+    std::memcpy(frame.pixels + (top + row) * kCharacterFrameWidth + left,
+                voiceOverlayScratch + row * kVoiceOverlayWidth,
+                kVoiceOverlayWidth * sizeof(uint16_t));
 }
 
 const char* modeName(CharacterMode mode) {
@@ -850,6 +1013,72 @@ const NetworkManager::CharacterUpload kWifiUpload{
     beginWifiInstall, writeWifiInstall, finishWifiInstall, abortWifiInstall,
     installedCharacterId};
 
+const uint8_t* wifiVoiceCapture(size_t& bytes, unsigned& sampleRate, uint32_t& id) {
+  const VoiceCaptureInfo capture = voiceCaptureInfo();
+  bytes = capture.bytes;
+  sampleRate = capture.sampleRate;
+  id = capture.id;
+  return capture.data;
+}
+
+bool consumeWifiVoiceCapture(uint32_t id) {
+  return consumeVoiceCapture(id);
+}
+
+void abortWifiVoicePlayback() {
+  if (wifiVoicePlayback) heap_caps_free(wifiVoicePlayback);
+  wifiVoicePlayback = nullptr;
+  wifiVoicePlaybackBytes = 0;
+  wifiVoicePlaybackReceived = 0;
+}
+
+const char* beginWifiVoicePlayback(size_t bytes, unsigned sampleRate) {
+  abortWifiVoicePlayback();
+  const VoiceAudioState state = voiceAudioState();
+  if (!canQueueVoicePlayback(state)) return "Microphone capture is active";
+  if (sampleRate != kAudioSampleRate || bytes == 0 || bytes > kVoiceMaximumPlaybackBytes
+      || bytes % sizeof(int16_t)) return "Invalid voice playback format";
+  wifiVoicePlayback = static_cast<uint8_t*>(
+      heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!wifiVoicePlayback) return "Voice playback allocation failed";
+  wifiVoicePlaybackBytes = bytes;
+  return nullptr;
+}
+
+const char* writeWifiVoicePlayback(const uint8_t* data, size_t bytes) {
+  if (!wifiVoicePlayback || wifiVoicePlaybackReceived + bytes > wifiVoicePlaybackBytes)
+    return "Voice playback body exceeds the declared length";
+  std::memcpy(wifiVoicePlayback + wifiVoicePlaybackReceived, data, bytes);
+  wifiVoicePlaybackReceived += bytes;
+  return nullptr;
+}
+
+const char* finishWifiVoicePlayback() {
+  if (!wifiVoicePlayback || wifiVoicePlaybackReceived != wifiVoicePlaybackBytes) {
+    abortWifiVoicePlayback();
+    return "Voice playback body is incomplete";
+  }
+  uint8_t* pcm = wifiVoicePlayback;
+  const size_t bytes = wifiVoicePlaybackBytes;
+  wifiVoicePlayback = nullptr;
+  wifiVoicePlaybackBytes = 0;
+  wifiVoicePlaybackReceived = 0;
+  if (queueVoicePlayback(pcm, bytes, kAudioSampleRate)) return nullptr;
+  heap_caps_free(pcm);
+  return "Voice playback queue is unavailable";
+}
+
+bool cancelWifiVoice() {
+  bool cancelled = cancelVoiceCapture();
+  cancelled = cancelVoicePlayback() || cancelled;
+  return cancelled;
+}
+
+const NetworkManager::VoiceControl kWifiVoice{
+    wifiVoiceCapture, consumeWifiVoiceCapture, beginWifiVoicePlayback,
+    writeWifiVoicePlayback, finishWifiVoicePlayback, abortWifiVoicePlayback,
+    cancelWifiVoice, voiceAudioStateName};
+
 void drawShellScreen() {
   display.fillScreen(0);
   drawWifiStatusButton();
@@ -969,7 +1198,8 @@ void processCommand(DeviceCommand command, const DeviceCommands& parser, const F
       network.encodedSsid(ssid, sizeof(ssid));
       logMessage("INFO protocol=%u uptime_ms=%llu reset_reason=%u mode=%s requested=%s assets=%u "
                  "max_gap_us=%u dropped_logs=%u audio_ready=%u sound_volume=%u character=%s "
-                 "patch_ram=adaptive patch_internal=%u startup_internal=%u wifi_connected=%u ssid_b64=%s firmware=%s\n",
+                 "patch_ram=adaptive patch_internal=%u startup_internal=%u wifi_connected=%u "
+                 "ssid_b64=%s firmware=%s board=%s speaker=%u microphone=%u voice_state=%s serial_baud=%u\n",
                     kDeviceProtocol, static_cast<unsigned long long>(esp_timer_get_time() / 1000),
                     static_cast<unsigned>(esp_reset_reason()),
                     frame ? modeName(frame->state.mode) : "none",
@@ -978,7 +1208,9 @@ void processCommand(DeviceCommand command, const DeviceCommands& parser, const F
                     droppedLogs.load(std::memory_order_relaxed), static_cast<unsigned>(audioReady()),
                     static_cast<unsigned>(soundVolume()), installedCharacterId(),
                     patchBuffersInternal, static_cast<unsigned>(startupFreeInternal),
-                    static_cast<unsigned>(network.connected()), ssid, network.firmwareId());
+                    static_cast<unsigned>(network.connected()), ssid, network.firmwareId(),
+                    board::kId, static_cast<unsigned>(kHasSpeaker),
+                    static_cast<unsigned>(kHasMicrophone), voiceAudioStateName(), kSerialBaud);
       if (pack) {
         logMessage("CHARACTER id=%s layout=%s bytes=%u name=%s\n", pack->header.id,
                    pack->header.layout == PackLayout::FullFrame ? "full-frame" : "base-patch",
@@ -1000,6 +1232,15 @@ void processCommand(DeviceCommand command, const DeviceCommands& parser, const F
       break;
     case DeviceCommand::ScanWifi:
       if (!network.startScan(reportWifiScanLine)) logMessage("WIFI_SCAN_ERROR scan unavailable\n");
+      break;
+    case DeviceCommand::ReadVoiceCapture:
+      sendVoiceCapture();
+      break;
+    case DeviceCommand::UploadVoice:
+      receiveVoicePlayback(parser.payload());
+      break;
+    case DeviceCommand::CancelVoice:
+      cancelVoice();
       break;
     case DeviceCommand::DefineAgentIcon:
     case DeviceCommand::SetAgentBadges:
@@ -1096,7 +1337,7 @@ void setup() {
 #if COPILOT_SERIAL_USB_CDC
   Serial.setTxTimeoutMs(0);
 #endif
-  Serial.begin(115200);
+  Serial.begin(kSerialBaud);
   if (!serialBufferReady || !receiveBufferReady) fatal("Serial buffer allocation failed.");
   Serial.setDebugOutput(true);
   if (!psramFound()) fatal("External PSRAM not detected.");
@@ -1115,7 +1356,8 @@ void setup() {
   orientationDirty = display.setTrim(orientationOffsetTenths * kOrientationPi / 1800.0f);
   // Start Wi-Fi before renderer and audio allocations so the radio stack can reserve contiguous
   // internal RAM. The character allocator will move optional patch buffers to PSRAM as needed.
-  network.begin(queueNetworkMode, &kWifiUpload, handleBadgePacket, &kOrientationControl);
+  network.begin(
+      queueNetworkMode, &kWifiUpload, handleBadgePacket, &kOrientationControl, &kWifiVoice);
   if (!orientationSensor.begin()) {
     logMessage("ORIENTATION disabled reason=%s\n", orientationSensor.error());
   } else {
@@ -1125,6 +1367,11 @@ void setup() {
   settings.setSoundVolume(storedSoundVolume);
   setSoundVolume(storedSoundVolume);
   beginAudio();
+  if constexpr (kHasMicrophone) {
+    voiceOverlayScratch = static_cast<uint16_t*>(allocate(
+        kVoiceOverlayWidth * kVoiceOverlayHeight * sizeof(uint16_t), MALLOC_CAP_SPIRAM,
+        "Voice overlay allocation failed."));
+  }
   transferBuffer = static_cast<uint8_t*>(heap_caps_aligned_alloc(
       16, kTransferBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
   if (!transferBuffer) fatal("Display staging allocation failed.");
@@ -1138,9 +1385,10 @@ void setup() {
     drawShellScreen();
     display.setBrightness(settings.brightness());
   }
-  logMessage("READY: %dx%d, target %d fps, character=%s bytes=%u\n",
+  logMessage("READY: %dx%d, target %d fps, character=%s bytes=%u board=%s speaker=%u microphone=%u\n",
              kDisplaySize, kDisplaySize, kTargetFps, installedCharacterId(),
-             static_cast<unsigned>(characterReady ? characterPack()->header.totalBytes : 0));
+             static_cast<unsigned>(characterReady ? characterPack()->header.totalBytes : 0),
+             board::kId, static_cast<unsigned>(kHasSpeaker), static_cast<unsigned>(kHasMicrophone));
 }
 
 // A BOOT button press asks the computer to open Settings. USB gets a line now; over Wi-Fi the
@@ -1249,8 +1497,11 @@ void loop() {
   previousPresentation = start;
   uint32_t transferUs = 0;
   if (!settings.isOpen() && !prompt) {
-    if (!display.flushFrame(
-            frame->pixels, kCharacterFrameX, 0, kCharacterFrameWidth, kCharacterFrameHeight))
+    renderVoiceOverlay(*frame);
+    const bool flushed = display.flushFrame(
+        frame->pixels, kCharacterFrameX, 0, kCharacterFrameWidth, kCharacterFrameHeight);
+    restoreVoiceOverlay(*frame);
+    if (!flushed)
       fatal(display.error());
   } else if (orientationChanged) {
     flushDisplay();
@@ -1261,7 +1512,35 @@ void loop() {
     ++fadeFrame;
   }
   TouchGesture gesture;
-  if (pollTouchGesture(gesture) && !prompt) handleTouchGesture(gesture, *frame);
+  const bool gestureReady = pollTouchGesture(gesture);
+  const TouchContact contact = currentTouchContact();
+  const VoicePushToTalkAction voiceAction = voicePushToTalk.sample(
+      contact.pressed, contact.x, contact.y,
+      kHasMicrophone && !settings.isOpen() && !prompt && !installStarted, millis());
+  switch (voiceAction) {
+    case VoicePushToTalkAction::Start:
+      logMessage("VOICE_TOUCH action=start x=%d y=%d at_ms=%u\n",
+                 contact.x, contact.y, static_cast<unsigned>(millis()));
+      if (!startVoiceCapture()) logMessage("VOICE_ERROR capture=start-failed\n");
+      break;
+    case VoicePushToTalkAction::Stop:
+      logMessage("VOICE_TOUCH action=stop at_ms=%u\n", static_cast<unsigned>(millis()));
+      if ((voiceAudioState() == VoiceAudioState::Starting
+           || voiceAudioState() == VoiceAudioState::Recording)
+          && !stopVoiceCapture()) {
+        logMessage("VOICE_ERROR capture=stop-failed\n");
+      }
+      break;
+    case VoicePushToTalkAction::Cancel:
+      logMessage("VOICE_TOUCH action=cancel x=%d y=%d at_ms=%u\n",
+                 contact.x, contact.y, static_cast<unsigned>(millis()));
+      cancelVoiceCapture();
+      break;
+    case VoicePushToTalkAction::None:
+      break;
+  }
+  if (gestureReady && !prompt && !voicePushToTalk.consumedLastSample())
+    handleTouchGesture(gesture, *frame);
   if (touchInputError()) fatal(touchInputError());
   pollBootButton();
   closeIdleSettings();

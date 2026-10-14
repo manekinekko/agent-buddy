@@ -66,7 +66,9 @@ case "$ACTION" in
   monitor)
     PYTHON=python3
     if [[ -x "$ROOT/.venv/bin/python" ]]; then PYTHON="$ROOT/.venv/bin/python"; fi
-    "$PYTHON" "$ROOT/tools/device.py" --port "${2:-/dev/cu.usbmodem2101}" --seconds "${3:-30}"
+    BAUD="$(python3 "$ROOT/tools/boards.py" field serial_baud)"
+    "$PYTHON" "$ROOT/tools/device.py" --port "${2:-/dev/cu.usbmodem2101}" \
+      --baud "$BAUD" --seconds "${3:-30}"
     ;;
   *)
     echo "Usage: [BOARD=<id>] bash tools/arduino.sh {build|upload [port]|upload-code [port]|monitor [port] [seconds]}" >&2

@@ -37,6 +37,7 @@ function fakeDevice(options: {silentAfterRestart: boolean; silent?: boolean; stu
         else setTimeout(() => reply('READY: character=bunny'), 5);
         return;
       }
+
       if (text === 'i') return reply(`INFO protocol=12 firmware=0123456789abcdef character=${state.character}`);
       if (text === 'o') return reply('ORIENTATION_SETTINGS offset_tenths=0');
       if (text === 'u') {
@@ -50,6 +51,71 @@ function fakeDevice(options: {silentAfterRestart: boolean; silent?: boolean; stu
     return binding;
   };
   return state;
+}
+
+function fakeVoiceDevice(options: {capture?: Buffer; trailerId?: number} = {}) {
+  MockBinding.reset();
+  MockBinding.createPort(path, {echo: false, record: false, vendorId: '303a', productId: '1001'});
+  const capture = options.capture ?? Buffer.from([0x0a, 0xff, 0xc3, 0x28, 0x00, 0x80, 0x0d, 0x0a]);
+  const state = {playback: Buffer.alloc(0), expected: 0};
+  let binding: MockPortBinding;
+  MockBinding.open = async openOptions => {
+    binding = await openPort(openOptions);
+    const write = binding.write.bind(binding);
+    const emit = (data: string | Buffer): void => {
+      setImmediate(() => binding.isOpen && binding.emitData(data));
+    };
+    const line = (text: string): void => emit(`${text}\n`);
+    binding.write = async (buffer: Buffer) => {
+      await write(buffer);
+      if (state.expected) {
+        state.playback = Buffer.concat([state.playback, buffer]);
+        if (state.playback.length < state.expected)
+          return line(`VOICE_PLAY_ACK received=${state.playback.length} total=${state.expected}`);
+        line(`VOICE_PLAY_ACK received=${state.playback.length} total=${state.expected}`);
+        line(`VOICE_PLAY_QUEUED bytes=${state.playback.length} sample_rate=24000`);
+        setTimeout(() => line('VOICE_PLAYBACK_END'), 5);
+        state.expected = 0;
+        return;
+      }
+      const text = buffer.toString('latin1');
+      if (text === 'i')
+        return line('INFO protocol=13 firmware=0123456789abcdef character=copilot speaker=1 microphone=1');
+      if (text === 'o') return line('ORIENTATION_SETTINGS offset_tenths=0');
+      if (text === 'v') {
+        const header = `VOICE_PCM id=7 bytes=${capture.length} sample_rate=16000 channels=1 format=s16le\n`;
+        emit(Buffer.from(header.slice(0, 19)));
+        emit(Buffer.concat([
+          Buffer.from(header.slice(19)),
+          capture.subarray(0, 3),
+        ]));
+        emit(Buffer.concat([
+          capture.subarray(3),
+          Buffer.from(`\nVOICE_PCM_END id=${options.trailerId ?? 7}\n`),
+        ]));
+        return;
+      }
+      const playback = /^~24000:(\d+)\n$/.exec(text);
+      if (playback) {
+        state.expected = Number(playback[1]);
+        state.playback = Buffer.alloc(0);
+        return line(`VOICE_PLAY_READY bytes=${state.expected} sample_rate=24000 chunk=4096`);
+      }
+      if (text === 'x') return line('VOICE_CANCELLED');
+    };
+    return binding;
+  };
+  return {
+    state,
+    capture,
+    ready(): void {
+      lineOnBinding(binding, `VOICE_CAPTURE id=7 bytes=${capture.length} sample_rate=16000 channels=1 format=s16le`);
+    },
+  };
+}
+
+function lineOnBinding(binding: MockPortBinding, line: string): void {
+  setImmediate(() => binding.isOpen && binding.emitData(`${line}\n`));
 }
 
 async function until(ready: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -142,6 +208,56 @@ test('a request to a device that stops reading fails at its timeout and does not
     assert.deepEqual(unhandled, []);
   } finally {
     process.off('unhandledRejection', record);
+    await usb.stop();
+  }
+});
+
+test('USB voice capture preserves arbitrary PCM bytes across fragmented serial data', async () => {
+  const device = fakeVoiceDevice();
+  let ready = 0;
+  const usb = new UsbTransport(undefined, undefined, {
+    serial: SerialPortMock,
+    requestTimeoutMs: 100,
+    voiceCaptureReady: () => { ready++; },
+  });
+  try {
+    usb.start();
+    await until(() => usb.connected);
+    assert.deepEqual(usb.capabilities, {speaker: true, microphone: true});
+    device.ready();
+    await until(() => ready === 1);
+    const capture = await usb.captureVoice();
+    assert.equal(capture.sampleRate, 16000);
+    assert.deepEqual(capture.pcm, device.capture);
+  } finally {
+    await usb.stop();
+  }
+});
+
+test('USB voice capture rejects a mismatched binary trailer', async () => {
+  fakeVoiceDevice({trailerId: 9});
+  const usb = new UsbTransport(undefined, undefined, {serial: SerialPortMock, requestTimeoutMs: 100});
+  try {
+    usb.start();
+    await until(() => usb.connected);
+    await assert.rejects(usb.captureVoice(), /invalid voice capture trailer/);
+  } finally {
+    await usb.stop();
+  }
+});
+
+test('USB voice playback applies chunk backpressure and waits for playback completion', async () => {
+  const device = fakeVoiceDevice();
+  const usb = new UsbTransport(undefined, undefined, {serial: SerialPortMock, requestTimeoutMs: 100});
+  const pcm = Buffer.alloc(9000);
+  pcm[20] = 0x0a;
+  pcm[4097] = 0xff;
+  try {
+    usb.start();
+    await until(() => usb.connected);
+    await usb.playVoice(pcm);
+    assert.deepEqual(device.state.playback, pcm);
+  } finally {
     await usb.stop();
   }
 });

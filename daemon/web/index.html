@@ -270,6 +270,7 @@
       <button type="button" role="tab" id="tab-characters" aria-controls="panel-characters" aria-selected="true">Characters</button>
       <button type="button" role="tab" id="tab-agents" aria-controls="panel-agents" aria-selected="false" tabindex="-1">Agents</button>
       <button type="button" role="tab" id="tab-wifi" aria-controls="panel-wifi" aria-selected="false" tabindex="-1">Device<span id="device-update-badge" class="update-dot" hidden><span class="visually-hidden">, firmware update available</span></span></button>
+      <button type="button" role="tab" id="tab-voice" aria-controls="panel-voice" aria-selected="false" tabindex="-1" hidden>Voice</button>
       <button type="button" role="tab" id="tab-desktop" aria-controls="panel-desktop" aria-selected="false" tabindex="-1">Desktop</button>
     </div>
 
@@ -426,6 +427,124 @@
         </span>
         </div>
       </details>
+    </section>
+
+    <section id="panel-voice" class="card panel voice-panel" role="tabpanel" aria-labelledby="tab-voice" tabindex="0" hidden>
+      <div class="voice-heading">
+        <div>
+          <h2>Local voice</h2>
+          <p class="hint">Whisper.cpp transcribes device audio. GitHub Copilot CLI answers in a dedicated session. macOS speaks the response.</p>
+        </div>
+        <span id="voice-service-state" class="pill offline">Checking…</span>
+      </div>
+      <p id="voice-service-hint" class="hint" role="status">Waiting for local voice status…</p>
+
+      <div class="voice-warnings">
+        <p><strong>Separate Copilot session.</strong> Voice history is kept in its own persisted Copilot CLI session. It is not the current Copilot app chat.</p>
+        <p><strong>Spoken prompts can change files.</strong> Allow all tools lets the non-interactive Copilot session run shell commands and edit files without another approval prompt.</p>
+        <p><strong>Wi-Fi audio is not encrypted.</strong> When the device uses Wi-Fi, microphone and speaker audio travel over plain HTTP on the local network.</p>
+      </div>
+
+      <div class="voice-capabilities" aria-label="Device voice capabilities">
+        <div>
+          <span><strong>Microphone and STT</strong><span id="voice-microphone-detail" class="hint">Waiting for device capability…</span></span>
+          <span id="voice-microphone-state" class="pill offline">Unknown</span>
+        </div>
+        <div>
+          <span><strong>Speaker and TTS</strong><span id="voice-speaker-detail" class="hint">Waiting for device capability…</span></span>
+          <span id="voice-speaker-state" class="pill offline">Unknown</span>
+        </div>
+      </div>
+
+      <label class="setting-row" for="voice-enabled">
+        <span>
+          <strong>Enable local voice</strong>
+          <span class="hint">Recording still starts only when the device asks for a voice turn.</span>
+        </span>
+        <input id="voice-enabled" class="toggle" type="checkbox" role="switch">
+      </label>
+
+      <section class="group" aria-labelledby="voice-stt-title">
+        <div class="group-head">
+          <h3 id="voice-stt-title">Speech to text</h3>
+          <span id="voice-stt-state" class="pill offline">Checking…</span>
+        </div>
+        <p id="voice-stt-hint" class="hint">Install Whisper.cpp and a local model before recording.</p>
+        <div class="voice-form-grid">
+          <label>Whisper executable
+            <input id="voice-whisper-executable" type="text" autocomplete="off"
+                   placeholder="Auto-detect whisper-cli, whisper-cpp, or main">
+            <span class="hint">Leave blank to search the service PATH, or enter a full executable path.</span>
+          </label>
+          <label>Whisper model
+            <input id="voice-whisper-model" type="text" autocomplete="off">
+            <span class="hint">Defaults to <code>ggml-base.bin</code> in Agent Buddy's voice model folder.</span>
+          </label>
+          <label>Maximum recording time
+            <span class="number-field"><input id="voice-max-recording" type="number" min="1" max="15" step="1"><span>seconds</span></span>
+            <span class="hint">Agent Buddy rejects longer captures instead of trimming them.</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="group" aria-labelledby="voice-tts-title">
+        <div class="group-head">
+          <h3 id="voice-tts-title">Text to speech</h3>
+          <span id="voice-tts-state" class="pill offline">Checking…</span>
+        </div>
+        <p id="voice-tts-hint" class="hint">macOS <code>say</code> creates the voice, then ffmpeg converts it to 24 kHz signed 16-bit mono PCM.</p>
+        <div class="voice-form-grid">
+          <label>macOS voice
+            <input id="voice-tts-voice" type="text" maxlength="128" autocomplete="off" placeholder="System default">
+          </label>
+          <label>Speaking rate
+            <span class="number-field"><input id="voice-tts-rate" type="number" min="80" max="450" step="1"><span>words per minute</span></span>
+          </label>
+        </div>
+        <div class="voice-actions">
+          <button type="button" id="voice-tts-test" class="secondary">Test speaker</button>
+        </div>
+      </section>
+
+      <section class="group" aria-labelledby="voice-copilot-title">
+        <div class="group-head"><h3 id="voice-copilot-title">Copilot voice session</h3></div>
+        <label class="setting-row voice-permission" for="voice-allow-tools">
+          <span>
+            <strong>Allow all tools for spoken prompts</strong>
+            <span class="hint">Required for non-interactive Copilot CLI. Turn it off to block voice turns until you are ready to grant this permission again.</span>
+          </span>
+          <input id="voice-allow-tools" class="toggle" type="checkbox" role="switch">
+        </label>
+        <div class="setting-row static">
+          <span>
+            <strong>Dedicated session ID</strong>
+            <code id="voice-session-id" class="voice-session-id">Not available</code>
+          </span>
+          <span class="row-actions">
+            <button type="button" id="voice-session-reset" class="secondary">Reset session</button>
+            <button type="button" id="voice-cancel" class="secondary" disabled>Cancel active turn</button>
+          </span>
+        </div>
+      </section>
+
+      <section class="group" aria-labelledby="voice-dependencies-title">
+        <div class="group-head">
+          <h3 id="voice-dependencies-title">Dependencies</h3>
+          <button type="button" id="voice-refresh" class="secondary">Refresh checks</button>
+        </div>
+        <ul class="voice-dependencies">
+          <li><span><strong>Whisper.cpp</strong><span id="voice-dep-whisper-detail" class="hint">Checking…</span></span><span id="voice-dep-whisper" class="pill offline">Checking…</span></li>
+          <li><span><strong>Whisper model</strong><span id="voice-dep-model-detail" class="hint">Checking…</span></span><span id="voice-dep-model" class="pill offline">Checking…</span></li>
+          <li><span><strong>macOS say</strong><span id="voice-dep-say-detail" class="hint">Checking…</span></span><span id="voice-dep-say" class="pill offline">Checking…</span></li>
+          <li><span><strong>ffmpeg</strong><span id="voice-dep-ffmpeg-detail" class="hint">Checking…</span></span><span id="voice-dep-ffmpeg" class="pill offline">Checking…</span></li>
+          <li><span><strong>GitHub Copilot CLI</strong><span id="voice-dep-copilot-detail" class="hint">Checking…</span></span><span id="voice-dep-copilot" class="pill offline">Checking…</span></li>
+        </ul>
+      </section>
+
+      <div class="voice-save">
+        <p id="voice-form-status" class="hint" role="status">Changes apply after you save them.</p>
+        <button type="button" id="voice-save">Save voice settings</button>
+      </div>
     </section>
 
     <section id="panel-desktop" class="card panel" role="tabpanel" aria-labelledby="tab-desktop" tabindex="0" hidden>

@@ -12,6 +12,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <algorithm>
 #include <cstring>
 #include <esp_app_desc.h>
 #include <esp_ota_ops.h>
@@ -77,11 +78,13 @@ void copyText(char* destination, size_t capacity, const String& source) {
 
 namespace copilot {
 void NetworkManager::begin(CommandHandler commandHandler, const CharacterUpload* upload,
-                           BadgeHandler badgeHandler, const OrientationControl* orientation) {
+                           BadgeHandler badgeHandler, const OrientationControl* orientation,
+                           const VoiceControl* voice) {
   commandHandler_ = commandHandler;
   upload_ = upload;
   badgeHandler_ = badgeHandler;
   orientation_ = orientation;
+  voice_ = voice;
   bootId_ = esp_random();
   // esp_app_get_elf_sha256() stops at CONFIG_APP_RETRIEVE_LEN_ELF_SHA (9) digits, so format the
   // first 8 bytes here; the daemon reads the same bytes from the .bin.
@@ -131,8 +134,8 @@ void NetworkManager::ensureIdentity() {
 }
 
 void NetworkManager::configureRoutes() {
-  const char* headers[] = {"Authorization", "X-Firmware-MD5"};
-  server.collectHeaders(headers, 2);
+  const char* headers[] = {"Authorization", "X-Firmware-MD5", "X-Sample-Rate"};
+  server.collectHeaders(headers, 3);
   server.on("/", HTTP_GET, [] { server.send(200, "text/html", kSetupPage); });
   server.on("/configure", HTTP_POST, [this] { handleConfigure(); });
   server.on("/pair", HTTP_POST, [this] { handlePair(); });
@@ -146,6 +149,10 @@ void NetworkManager::configureRoutes() {
   server.on("/firmware/approval", HTTP_POST, [this] { handleFirmwareApproval(); });
   server.on("/firmware", HTTP_POST, [this] { handleFirmwareResponse(); },
             [this] { handleFirmwareBody(); });
+  server.on("/voice/capture", HTTP_GET, [this] { handleVoiceCapture(); });
+  server.on("/voice/playback", HTTP_POST, [this] { handleVoicePlaybackResponse(); },
+            [this] { handleVoicePlaybackBody(); });
+  server.on("/voice/cancel", HTTP_POST, [this] { handleVoiceCancel(); });
   server.on("/status", HTTP_GET, [this] { handleStatus(); });
   server.onNotFound([] {
     server.sendHeader("Location", "/", true);
@@ -160,20 +167,124 @@ void NetworkManager::handleStatus() {
   char orientation[8] = "null";
   if (orientation_) snprintf(orientation, sizeof(orientation), "%d", orientation_->offset());
   const FirmwareApproval approval = firmwareApproval();
-  char response[544];
+  char response[672];
   snprintf(response, sizeof(response),
            "{\"deviceId\":\"%s\",\"hostname\":\"%s\",\"connected\":%s,\"boot\":%u,\"protocol\":%u,"
            "\"character\":\"%s\",\"patchRam\":\"adaptive\",\"ssidBase64\":\"%s\",\"firmware\":\"%s\","
            "\"buttonPresses\":%u,\"firmwareApproval\":\"%s\",\"orientationOffsetTenths\":%s,"
-           "\"board\":\"%s\"}",
+           "\"board\":\"%s\",\"capabilities\":{\"speaker\":%s,\"microphone\":%s},"
+           "\"voiceState\":\"%s\"}",
            deviceId_, hostname_, connected_ ? "true" : "false",
            static_cast<unsigned>(bootId_), static_cast<unsigned>(kDeviceProtocol),
            upload_ ? upload_->installedId() : "none", encodedName, firmwareId_,
            static_cast<unsigned>(buttonPresses_),
            approval == FirmwareApproval::Waiting ? "waiting"
                : approval == FirmwareApproval::Allowed ? "allowed" : "none", orientation,
-           board::kId);
+           board::kId, kHasSpeaker ? "true" : "false",
+           kHasMicrophone ? "true" : "false",
+           voice_ && voice_->state ? voice_->state() : "unavailable");
   server.send(200, "application/json", response);
+}
+
+void NetworkManager::handleVoiceCapture() {
+  if (!requireAuthorized()) return;
+  if (!voice_ || !voice_->capture || !voice_->consumeCapture || !kHasMicrophone) {
+    server.send(501, "application/json", "{\"error\":\"Microphone capture is unavailable\"}");
+    return;
+  }
+  size_t bytes = 0;
+  unsigned sampleRate = 0;
+  uint32_t id = 0;
+  const uint8_t* data = voice_->capture(bytes, sampleRate, id);
+  if (!data || bytes == 0) {
+    server.send(409, "application/json", "{\"error\":\"No microphone capture is ready\"}");
+    return;
+  }
+  char value[24];
+  snprintf(value, sizeof(value), "%u", sampleRate);
+  server.sendHeader("X-Sample-Rate", value);
+  snprintf(value, sizeof(value), "%u", static_cast<unsigned>(id));
+  server.sendHeader("X-Capture-Id", value);
+  server.sendHeader("X-Audio-Format", "s16le-mono");
+  server.setContentLength(bytes);
+  server.send(200, "application/octet-stream", "");
+  NetworkClient client = server.client();
+  size_t sent = 0;
+  uint32_t progress = millis();
+  while (sent < bytes && client.connected()) {
+    const size_t count = client.write(data + sent, std::min<size_t>(4096, bytes - sent));
+    sent += count;
+    if (count) progress = millis();
+    else if (millis() - progress > 5000) break;
+    if (!count) delay(1);
+  }
+  if (sent == bytes) voice_->consumeCapture(id);
+}
+
+void NetworkManager::handleVoicePlaybackBody() {
+  HTTPRaw& raw = server.raw();
+  if (raw.status == RAW_START) {
+    voicePlaybackAuthorized_ = authorized();
+    voicePlaybackStarted_ = false;
+    voicePlaybackError_ = nullptr;
+    if (!voicePlaybackAuthorized_ || !voice_ || !kHasSpeaker) return;
+    voicePlaybackStarted_ = true;
+    const long sampleRate = server.header("X-Sample-Rate").toInt();
+    if (sampleRate <= 0) {
+      voicePlaybackError_ = "Missing or invalid X-Sample-Rate";
+    } else {
+      voicePlaybackError_ = voice_->beginPlayback(raw.totalSize, static_cast<unsigned>(sampleRate));
+    }
+    return;
+  }
+  if (!voicePlaybackStarted_) return;
+  if (raw.status == RAW_WRITE) {
+    if (!voicePlaybackError_)
+      voicePlaybackError_ = voice_->writePlayback(raw.buf, raw.currentSize);
+  } else if (raw.status == RAW_END) {
+    if (!voicePlaybackError_) voicePlaybackError_ = voice_->finishPlayback();
+    else voice_->abortPlayback();
+  } else if (raw.status == RAW_ABORTED) {
+    voicePlaybackError_ = "Voice playback upload was interrupted";
+    voice_->abortPlayback();
+  }
+}
+
+void NetworkManager::handleVoicePlaybackResponse() {
+  const bool authorizedPlayback = voicePlaybackAuthorized_;
+  voicePlaybackAuthorized_ = false;
+  if (!authorizedPlayback) {
+    sendUnauthorized();
+    return;
+  }
+  if (!voice_ || !kHasSpeaker) {
+    server.send(501, "application/json", "{\"error\":\"Speaker playback is unavailable\"}");
+    return;
+  }
+  if (!voicePlaybackStarted_) {
+    server.send(400, "application/json", "{\"error\":\"Missing voice playback body\"}");
+    return;
+  }
+  voicePlaybackStarted_ = false;
+  if (voicePlaybackError_) {
+    char response[192];
+    snprintf(response, sizeof(response), "{\"error\":\"%s\"}", voicePlaybackError_);
+    server.send(400, "application/json", response);
+    return;
+  }
+  server.send(200, "application/json", "{\"ok\":true,\"queued\":true}");
+}
+
+void NetworkManager::handleVoiceCancel() {
+  if (!requireAuthorized()) return;
+  if (!voice_ || !voice_->cancel) {
+    server.send(501, "application/json", "{\"error\":\"Voice cancellation is unavailable\"}");
+    return;
+  }
+  const bool cancelled = voice_->cancel();
+  server.send(200, "application/json",
+              cancelled ? "{\"ok\":true,\"cancelled\":true}"
+                        : "{\"ok\":true,\"cancelled\":false}");
 }
 
 void NetworkManager::handleOrientation() {

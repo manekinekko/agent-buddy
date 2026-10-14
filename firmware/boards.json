@@ -8,6 +8,11 @@
       "define": "AGENT_BOARD_WAVESHARE_AMOLED_175",
       "directory": "waveshare_amoled_175",
       "chip": "esp32s3",
+      "capabilities": {
+        "speaker": true,
+        "microphone": true
+      },
+      "serial_baud": 115200,
       "flash_size": "16MB",
       "partitions": "firmware/AgentCompanion/partitions.csv",
       "flash": {
@@ -37,6 +42,11 @@
       "define": "AGENT_BOARD_WAVESHARE_P4_86",
       "directory": "waveshare_p4_86",
       "chip": "esp32p4",
+      "capabilities": {
+        "speaker": true,
+        "microphone": true
+      },
+      "serial_baud": 921600,
       "flash_size": "32MB",
       "partitions": "firmware/AgentCompanion/partitions-waveshare-p4-86.csv",
       "flash": {

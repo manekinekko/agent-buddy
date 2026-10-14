@@ -1147,6 +1147,9 @@ A bounded health check and PNG capture are also included:
 ```bash
 .venv/bin/pip install -r requirements-device.txt -r requirements-art.txt
 .venv/bin/python tools/device.py --seconds 60 --capture preview/device-capture.png
+# Override serial speed when the port name does not identify the board.
+.venv/bin/python tools/device.py --port /dev/cu.wchusbserial5ABA0517681 \
+  --baud 921600 --seconds 60
 # A five-minute memory/pacing soak; initial warmup is logged separately.
 .venv/bin/python tools/device.py --warmup-seconds 30 --seconds 300 \
   --check-memory --max-gap-ms 35 --log build/device-soak.log

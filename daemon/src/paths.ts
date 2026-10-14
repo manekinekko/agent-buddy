@@ -136,6 +136,24 @@ export function usageCachePath(): string {
   return join(defaultDataDirectory(process.platform, homedir(), process.env), 'usage-cache.json');
 }
 
+export function voiceConfigPath(): string {
+  if (process.env.AGENT_COMPANION_VOICE_CONFIG) return process.env.AGENT_COMPANION_VOICE_CONFIG;
+  return join(defaultDataDirectory(process.platform, homedir(), process.env), 'voice.json');
+}
+
+export function voiceDirectory(): string {
+  if (process.env.AGENT_COMPANION_VOICE_DIRECTORY) return process.env.AGENT_COMPANION_VOICE_DIRECTORY;
+  return join(defaultDataDirectory(process.platform, homedir(), process.env), 'voice');
+}
+
+export function voiceModelDirectory(): string {
+  return join(voiceDirectory(), 'models');
+}
+
+export function defaultWhisperModelPath(): string {
+  return join(voiceModelDirectory(), 'ggml-base.bin');
+}
+
 // %LOCALAPPDATA%, or its usual place when it is not set to an absolute path.
 export function windowsLocalAppData(home: string, environment: NodeJS.ProcessEnv): string {
   const local = environment.LOCALAPPDATA?.trim();

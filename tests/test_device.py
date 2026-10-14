@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from tools.device import (DEVICE_PROTOCOL, NonResettingSerial, read_frame_end, parse_memory, validate_memory,
-                          request_mode, capture, parse_character_status,
+                          request_mode, capture, default_baud, parse_character_status,
                           request_character_status)
 
 
@@ -47,6 +47,11 @@ class CharacterTelemetryTests(unittest.TestCase):
 
 
 class FrameProtocolTests(unittest.TestCase):
+    def test_board_aware_default_baud(self):
+        self.assertEqual(default_baud("/dev/cu.wchusbserial5ABA0517681"), 921600)
+        self.assertEqual(default_baud("/dev/cu.usbmodem2101"), 115200)
+        self.assertEqual(default_baud("COM7"), 115200)
+
     def test_legacy_and_full_height_captures(self):
         from PIL import Image
 

@@ -17,7 +17,11 @@ MEMORY_FIELDS = (
 )
 CHARACTER_MODES = ("idle", "surprise", "working", "complete", "attention")
 # Newest firmware command protocol this tool understands; every earlier one stays compatible.
-DEVICE_PROTOCOL = 12
+DEVICE_PROTOCOL = 13
+
+
+def default_baud(port):
+    return 921600 if "wchusbserial" in port.lower() else 115200
 
 def parse_character_status(line):
     if not line.startswith("CHARACTER "):
@@ -188,6 +192,8 @@ def capture(port, destination):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default="/dev/cu.usbmodem2101")
+    parser.add_argument("--baud", type=int,
+                        help="Serial baud rate. Defaults to 921600 for WCH P4 ports and 115200 otherwise.")
     parser.add_argument("--seconds", type=float, default=30)
     parser.add_argument("--min-fps", type=float, default=29)
     parser.add_argument("--capture", type=Path)
@@ -204,6 +210,8 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.seconds) or args.seconds < 6:
         parser.error("--seconds must be at least 6 to receive a PERF report")
+    if args.baud is not None and args.baud <= 0:
+        parser.error("--baud must be positive.")
     if not math.isfinite(args.min_fps) or args.min_fps <= 0:
         parser.error("--min-fps must be finite and positive.")
     if not math.isfinite(args.warmup_seconds) or args.warmup_seconds < 0 or args.memory_tolerance < 0:
@@ -212,7 +220,8 @@ def main():
         parser.error("--max-gap-ms must be finite and positive.")
     if os.name != "posix":
         parser.error("Non-resetting observation currently supports macOS and Linux.")
-    port = NonResettingSerial(port=None, baudrate=115200, timeout=0.5)
+    baud = args.baud or default_baud(args.port)
+    port = NonResettingSerial(port=None, baudrate=baud, timeout=0.5)
     port.port = args.port
     lines, rates, memory, gaps = [], [], [], []
     try:

@@ -32,6 +32,11 @@ let wifiScanning = false;
 let wifiScanned = false;
 let orientationPending = false;
 let orientationDragging = false;
+let voiceStatus = null;
+let voiceDirty = false;
+let voicePending = false;
+let voicePendingMessage = '';
+let voiceLoading = false;
 // The status stream from the service.
 let events = null;
 
@@ -286,6 +291,7 @@ function renderStatus() {
     renderOrientation();
     renderUsage();
     renderFirmware();
+    renderVoice();
     return;
   }
   const connected = status.connected;
@@ -381,6 +387,7 @@ function renderStatus() {
     $('install-bar').style.width = `${install.percent}%`;
     $('install').querySelector('.bar').setAttribute('aria-valuenow', String(install.percent));
   }
+  renderVoice();
 }
 
 const closeIcon = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">'
@@ -1136,6 +1143,287 @@ $('firmware-update').addEventListener('click', async () => {
   }
 });
 
+const voiceStateNames = {
+  idle: 'Idle',
+  transcribing: 'Transcribing',
+  thinking: 'Waiting for Copilot',
+  speaking: 'Speaking',
+  testing: 'Testing speaker',
+  canceling: 'Canceling',
+  error: 'Error',
+};
+const voiceDependencyIds = ['whisper', 'model', 'say', 'ffmpeg', 'copilot'];
+
+function currentVoiceStatus() {
+  return status ? (voiceStatus ?? status.voice ?? null) : null;
+}
+
+function voiceCapabilities() {
+  const voice = currentVoiceStatus();
+  const reported = voice?.capabilities ?? status?.capabilities ?? {};
+  return {
+    microphone: typeof reported.microphone === 'boolean' ? reported.microphone : null,
+    speaker: typeof reported.speaker === 'boolean' ? reported.speaker : null,
+  };
+}
+
+function setVoicePill(id, text, kind) {
+  const element = $(id);
+  element.textContent = text;
+  element.className = `pill ${kind}`;
+}
+
+function renderVoiceCapability(kind, available) {
+  const microphone = kind === 'microphone';
+  const title = microphone ? 'voice-microphone' : 'voice-speaker';
+  if (available === true) {
+    setVoicePill(`${title}-state`, 'Supported', 'usb');
+    $(`${title}-detail`).textContent = microphone
+      ? 'The connected device reports microphone capture support.'
+      : 'The connected device reports PCM speaker playback support.';
+  } else if (available === false) {
+    setVoicePill(`${title}-state`, 'Not supported', 'offline');
+    $(`${title}-detail`).textContent = microphone
+      ? 'This device cannot capture audio. Speech to text controls remain for future supported hardware.'
+      : 'This device cannot play voice audio. Speaker tests are disabled.';
+  } else {
+    setVoicePill(`${title}-state`, 'Unknown', 'offline');
+    $(`${title}-detail`).textContent = status?.connected
+      ? 'The connected firmware does not report this capability yet.'
+      : 'Connect a device to check this capability.';
+  }
+}
+
+function renderVoiceDependency(name, dependency) {
+  if (!dependency) {
+    setVoicePill(`voice-dep-${name}`, 'Checking…', 'offline');
+    $(`voice-dep-${name}-detail`).textContent = 'Waiting for dependency status…';
+    return;
+  }
+  setVoicePill(`voice-dep-${name}`, dependency.available ? 'Ready' : 'Missing',
+    dependency.available ? 'usb' : 'warning');
+  $(`voice-dep-${name}-detail`).textContent = `${dependency.message} ${dependency.guidance}`.trim();
+}
+
+function renderVoice() {
+  const voice = currentVoiceStatus();
+  const capabilities = voiceCapabilities();
+  const exposed = Boolean(voice || capabilities.microphone !== null || capabilities.speaker !== null);
+  const tab = $('tab-voice');
+  tab.hidden = !exposed;
+  if (!exposed && tab.getAttribute?.('aria-selected') === 'true') {
+    const fallback = tabs.find(candidate => !candidate.hidden);
+    if (fallback) selectTab(fallback);
+  }
+  renderVoiceCapability('microphone', capabilities.microphone);
+  renderVoiceCapability('speaker', capabilities.speaker);
+
+  if (!voice) {
+    setVoicePill('voice-service-state', status ? 'Unavailable' : 'Offline', 'offline');
+    $('voice-service-hint').textContent = status
+      ? 'This companion service was not started with the local voice service.'
+      : 'Waiting for the companion service…';
+  } else if (voice.active) {
+    setVoicePill('voice-service-state', voiceStateNames[voice.state] ?? voice.state, 'warning');
+    $('voice-service-hint').textContent = 'One voice operation is active. You can cancel it below.';
+  } else if (voice.state === 'error' || voice.lastError) {
+    setVoicePill('voice-service-state', 'Needs attention', 'warning');
+    $('voice-service-hint').textContent = voice.lastError;
+  } else if (!voice.config.enabled) {
+    setVoicePill('voice-service-state', 'Off', 'offline');
+    $('voice-service-hint').textContent = 'Local voice is disabled. Settings and dependency checks remain available.';
+  } else if (voice.ready) {
+    setVoicePill('voice-service-state', 'Ready', 'usb');
+    $('voice-service-hint').textContent = 'Local transcription, Copilot, synthesis, and PCM conversion are ready.';
+  } else {
+    setVoicePill('voice-service-state', 'Setup needed', 'warning');
+    $('voice-service-hint').textContent = voice.configurationWarning
+      ?? 'Review the missing dependencies and permission below.';
+  }
+
+  if (voice && !voiceDirty && !voicePending) {
+    $('voice-enabled').checked = voice.config.enabled;
+    $('voice-whisper-executable').value = voice.config.whisperExecutable;
+    $('voice-whisper-model').value = voice.config.whisperModelPath;
+    $('voice-max-recording').value = String(voice.config.maxRecordingSeconds);
+    $('voice-tts-voice').value = voice.config.ttsVoice;
+    $('voice-tts-rate').value = String(voice.config.ttsRate);
+    $('voice-allow-tools').checked = voice.config.allowAllTools;
+  }
+  $('voice-session-id').textContent = voice?.config.sessionId ?? 'Not available';
+
+  const unavailable = !voice || voicePending;
+  for (const id of [
+    'voice-enabled', 'voice-whisper-executable', 'voice-whisper-model', 'voice-max-recording',
+    'voice-tts-voice', 'voice-tts-rate', 'voice-allow-tools',
+  ]) $(id).disabled = unavailable;
+  $('voice-save').disabled = unavailable || !voiceDirty;
+  $('voice-session-reset').disabled = unavailable || Boolean(voice?.active);
+  $('voice-cancel').disabled = !voice?.active || voicePending;
+  $('voice-tts-test').disabled = unavailable || !voice?.ttsReady || voice.active || capabilities.speaker === false;
+  $('voice-refresh').disabled = !voice || voicePending || voiceLoading;
+
+  const sttSupported = capabilities.microphone !== false;
+  if (!sttSupported) {
+    setVoicePill('voice-stt-state', 'Not supported', 'offline');
+    $('voice-stt-hint').textContent = 'The connected device has no microphone capability.';
+  } else if (voice?.sttReady) {
+    setVoicePill('voice-stt-state', capabilities.microphone === true ? 'Ready' : 'Host ready', 'usb');
+    $('voice-stt-hint').textContent = capabilities.microphone === true
+      ? 'Whisper.cpp and the device microphone are ready.'
+      : 'Whisper.cpp is ready. Device microphone capability is not known yet.';
+  } else {
+    setVoicePill('voice-stt-state', 'Setup needed', 'warning');
+    $('voice-stt-hint').textContent = 'Install Whisper.cpp and a model before recording.';
+  }
+
+  if (capabilities.speaker === false) {
+    setVoicePill('voice-tts-state', 'Not supported', 'offline');
+    $('voice-tts-hint').textContent = 'The connected device has no speaker capability.';
+  } else if (voice?.ttsReady) {
+    setVoicePill('voice-tts-state', capabilities.speaker === true ? 'Ready' : 'Host ready', 'usb');
+    $('voice-tts-hint').textContent = capabilities.speaker === true
+      ? 'macOS say, ffmpeg, and the device speaker are ready.'
+      : 'macOS say and ffmpeg are ready. Device speaker capability is not known yet.';
+  } else {
+    setVoicePill('voice-tts-state', 'Setup needed', 'warning');
+    $('voice-tts-hint').textContent = 'Local TTS needs macOS say and ffmpeg.';
+  }
+
+  for (const name of voiceDependencyIds) renderVoiceDependency(name, voice?.dependencies?.[name]);
+  $('voice-form-status').textContent = voiceLoading
+    ? 'Refreshing voice dependency checks…'
+    : voicePending
+    ? voicePendingMessage
+    : voiceDirty ? 'Voice settings have unsaved changes.'
+    : voice ? 'Voice settings are saved.' : 'Voice settings are unavailable.';
+}
+
+async function refreshVoiceStatus({quiet = false} = {}) {
+  if (voiceLoading) return false;
+  voiceLoading = true;
+  renderVoice();
+  try {
+    voiceStatus = await api('/api/voice');
+    if (status) status.voice = voiceStatus;
+    return true;
+  } catch (error) {
+    if (!quiet) toast(error.message, 'error');
+    return false;
+  } finally {
+    voiceLoading = false;
+    renderVoice();
+  }
+}
+
+for (const id of [
+  'voice-enabled', 'voice-whisper-executable', 'voice-whisper-model', 'voice-max-recording',
+  'voice-tts-voice', 'voice-tts-rate', 'voice-allow-tools',
+]) {
+  $(id).addEventListener('input', () => {
+    voiceDirty = true;
+    renderVoice();
+  });
+}
+
+$('voice-save').addEventListener('click', async () => {
+  const voice = currentVoiceStatus();
+  if (!voice) return;
+  const change = {
+    enabled: $('voice-enabled').checked,
+    whisperExecutable: $('voice-whisper-executable').value,
+    whisperModelPath: $('voice-whisper-model').value,
+    maxRecordingSeconds: Number($('voice-max-recording').value),
+    ttsVoice: $('voice-tts-voice').value,
+    ttsRate: Number($('voice-tts-rate').value),
+    allowAllTools: $('voice-allow-tools').checked,
+  };
+  if (!voice.config.allowAllTools && change.allowAllTools
+      && !await confirmAction(
+        'Allow spoken prompts to run shell commands and edit files through the dedicated Copilot CLI session?',
+        'Allow all tools', undefined, {title: 'Allow all tools for voice'})) return;
+  voicePending = true;
+  voicePendingMessage = 'Saving voice settings…';
+  renderVoice();
+  try {
+    const result = await api('/api/voice', {
+      method: 'POST', type: 'application/json', body: JSON.stringify(change)});
+    voiceStatus = result.voice;
+    if (status) status.voice = result.voice;
+    voiceDirty = false;
+    toast('Voice settings saved.', 'success');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    voicePending = false;
+    voicePendingMessage = '';
+    renderVoice();
+  }
+});
+
+$('voice-tts-test').addEventListener('click', async () => {
+  voicePending = true;
+  voicePendingMessage = 'Running the speaker test…';
+  renderVoice();
+  try {
+    const result = await api('/api/voice/tts-test', {
+      method: 'POST', type: 'application/json', body: JSON.stringify({})});
+    voiceStatus = result.voice;
+    if (status) status.voice = result.voice;
+    toast('The local voice test was sent to the device speaker.', 'success');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    voicePending = false;
+    voicePendingMessage = '';
+    renderVoice();
+  }
+});
+
+$('voice-session-reset').addEventListener('click', async () => {
+  if (!await confirmAction(
+    'Reset the dedicated voice session? The next spoken prompt starts without the previous voice conversation history.',
+    'Reset session')) return;
+  voicePending = true;
+  voicePendingMessage = 'Resetting the dedicated voice session…';
+  renderVoice();
+  try {
+    const result = await api('/api/voice/session/reset', {method: 'POST'});
+    voiceStatus = result.voice;
+    if (status) status.voice = result.voice;
+    toast('The dedicated voice session was reset.', 'success');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    voicePending = false;
+    voicePendingMessage = '';
+    renderVoice();
+  }
+});
+
+$('voice-cancel').addEventListener('click', async () => {
+  voicePending = true;
+  voicePendingMessage = 'Canceling the active voice operation…';
+  renderVoice();
+  try {
+    const result = await api('/api/voice/cancel', {method: 'POST'});
+    voiceStatus = result.voice;
+    if (status) status.voice = result.voice;
+    toast(result.cancelled ? 'Canceling the active voice operation.' : 'No voice operation was active.',
+      result.cancelled ? 'success' : 'info');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    voicePending = false;
+    voicePendingMessage = '';
+    renderVoice();
+  }
+});
+
+$('voice-refresh').addEventListener('click', async () => {
+  if (await refreshVoiceStatus()) toast('Voice dependency checks refreshed.', 'success');
+});
+
 // Tabs follow the ARIA tabs pattern: arrow keys, Home and End move between them.
 const tabs = [...document.querySelectorAll('[role="tab"]')];
 
@@ -1150,14 +1438,18 @@ function selectTab(selected, focus = false) {
 }
 
 for (const tab of tabs) {
-  tab.addEventListener('click', () => selectTab(tab));
+  tab.addEventListener('click', () => {
+    selectTab(tab);
+    if (tab.id === 'tab-voice') void refreshVoiceStatus({quiet: true});
+  });
   tab.addEventListener('keydown', event => {
-    const index = tabs.indexOf(tab);
+    const available = tabs.filter(candidate => !candidate.hidden);
+    const index = available.indexOf(tab);
     const next = {
-      ArrowRight: tabs[(index + 1) % tabs.length],
-      ArrowLeft: tabs[(index - 1 + tabs.length) % tabs.length],
-      Home: tabs[0],
-      End: tabs[tabs.length - 1],
+      ArrowRight: available[(index + 1) % available.length],
+      ArrowLeft: available[(index - 1 + available.length) % available.length],
+      Home: available[0],
+      End: available[available.length - 1],
     }[event.key];
     if (!next) return;
     event.preventDefault();
@@ -1339,6 +1631,7 @@ $('setup-guides').addEventListener('click', () => void restartSetup(true));
 function onStatus(next) {
   const previous = status;
   status = next;
+  voiceStatus = next.voice ?? null;
   const settingUp = next.onboarding?.completed === false;
   document.body.classList.toggle('setup-active', settingUp);
   $('onboarding').hidden = !settingUp;

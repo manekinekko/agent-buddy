@@ -9,6 +9,12 @@ struct TouchGesture {
   int16_t startX = 0, startY = 0, endX = 0, endY = 0;
 };
 
+struct TouchContact {
+  bool pressed = false;
+  int16_t x = 0;
+  int16_t y = 0;
+};
+
 class TouchGestureTracker {
  public:
   bool sample(bool pressed, int16_t x, int16_t y, uint64_t milliseconds,
@@ -60,6 +66,7 @@ class TouchGestureTracker {
 
 bool initializeTouchInput();
 bool pollTouchGesture(TouchGesture& gesture);
+TouchContact currentTouchContact();
 void setTouchRotation(float radians);
 const char* touchInputError();
 }

@@ -1,7 +1,7 @@
 #pragma once
 // Device-only drivers for the Waveshare ESP32-S3-Touch-AMOLED-1.75 (see BoardConfig.h).
 #include "BoardConfig.h"
-#include "../drivers/Es8311AudioOutput.h"
+#include "../drivers/Es8311Es7210Audio.h"
 #include "../drivers/Qmi8658Accelerometer.h"
 #include <Arduino_GFX_Library.h>
 #include <TouchDrvCSTXXX.hpp>
@@ -38,10 +38,12 @@ inline Qmi8658Accelerometer& accelerometer() {
   return sensor;
 }
 
-inline Es8311AudioOutput& audioOutput() {
-  static Es8311AudioOutput output({kAudioMclkPin, kAudioBclkPin, kAudioWordSelectPin, kAudioDataOutPin,
-                                   kAudioAmplifierPin, kI2cPort, kAudioCodecI2cAddress,
-                                   kAudioMinimumCodecVolume, kAudioMaximumCodecVolume});
+inline Es8311Es7210Audio& audioOutput() {
+  static Es8311Es7210Audio output({
+      kAudioMclkPin, kAudioBclkPin, kAudioWordSelectPin, kAudioDataOutPin,
+      kAudioDataInPin, kAudioAmplifierPin, kI2cPort, kAudioCodecI2cAddress,
+      kMicrophoneCodecI2cAddress, kAudioMinimumCodecVolume, kAudioMaximumCodecVolume,
+      kMicrophoneGain, kMicrophoneSlots, kMicrophoneSlot});
   return output;
 }
 }  // namespace board

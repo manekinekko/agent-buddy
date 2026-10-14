@@ -368,6 +368,7 @@ export class CompanionService extends EventEmitter {
       charactersRevision: this.#charactersRevision,
       network: this.#transport.network,
       orientation: this.#transport.orientation,
+      capabilities: this.#transport.capabilities,
       mode: this.#transport.mode,
       sessions: this.#coordinator.sessionCount,
       agents: this.agentStatuses(),

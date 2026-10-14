@@ -13,7 +13,7 @@ static DeviceCommand send(DeviceCommands& parser, const std::string& text) {
 }
 
 int main() {
-  static_assert(kDeviceProtocol == 12);
+  static_assert(kDeviceProtocol == 13);
   DeviceCommands parser;
   for (DeviceCommand command : {DeviceCommand::Idle, DeviceCommand::Surprise, DeviceCommand::Working,
                                 DeviceCommand::Complete, DeviceCommand::Attention}) {
@@ -25,6 +25,16 @@ int main() {
   assert(send(parser, "u") == DeviceCommand::UploadCharacter);
   assert(send(parser, "w") == DeviceCommand::ScanWifi);
   assert(send(parser, "o") == DeviceCommand::GetOrientation);
+  assert(send(parser, "v") == DeviceCommand::ReadVoiceCapture);
+  assert(send(parser, "x") == DeviceCommand::CancelVoice);
+  assert(send(parser, "~24000:480000\n") == DeviceCommand::UploadVoice);
+  VoicePlaybackPacket voice;
+  assert(parseVoicePlaybackPacket(parser.payload(), voice));
+  assert(voice.sampleRate == 24000 && voice.bytes == 480000);
+  for (const char* invalid : {"", "24000", ":400", "24000:", "0:400", "24000:0",
+                              "24000:-1", "24000:1:2", "4294967296:1"})
+    assert(!parseVoicePlaybackPacket(invalid, voice));
+  assert(send(parser, "~24000:-1\n") == DeviceCommand::Invalid);
   assert(send(parser, "^-25\n") == DeviceCommand::ConfigureOrientation);
   int16_t offset;
   assert(parseOrientationOffset(parser.payload(), offset) && offset == -25);
@@ -54,7 +64,7 @@ int main() {
   assert(send(parser, "%copilot?:6F7CFF:" + mask + "\n") == DeviceCommand::Invalid);
   assert(send(parser, "&copilot=W\n") == DeviceCommand::Invalid);
   assert(send(parser, "\n") == DeviceCommand::None);
-  assert(send(parser, "x") == DeviceCommand::Invalid);
+  assert(send(parser, "q") == DeviceCommand::Invalid);
   assert(send(parser, "!not-a-mode\n") == DeviceCommand::Invalid);
   assert(send(parser, "!" + std::string(100, 's') + "\n") == DeviceCommand::Invalid);
   assert(send(parser, "!working\n") == DeviceCommand::Working);
@@ -63,5 +73,5 @@ int main() {
   assert(parser.expire(1000) == DeviceCommand::Invalid);
   assert(send(parser, "!attention\n") == DeviceCommand::Attention);
   assert(send(parser, "%" + std::string(192, 'a') + "\n") == DeviceCommand::Invalid);
-  std::cout << "PASS: bounded mode, Wi-Fi, badge and usage packets, legacy diagnostics, CRLF, overflow and timeout recovery\n";
+  std::cout << "PASS: bounded mode, Wi-Fi, badge, usage, voice packets, diagnostics, CRLF, overflow and timeout recovery\n";
 }

@@ -48,11 +48,19 @@ constexpr int kAudioMclkPin = 42;
 constexpr int kAudioBclkPin = 9;
 constexpr int kAudioWordSelectPin = 45;
 constexpr int kAudioDataOutPin = 8;
+constexpr int kAudioDataInPin = 10;
 constexpr int kAudioAmplifierPin = 46;
 constexpr uint8_t kAudioCodecI2cAddress = 0x18;
+constexpr uint8_t kMicrophoneCodecI2cAddress = 0x40;
+constexpr uint8_t kMicrophoneGain = 8;
+constexpr uint8_t kMicrophoneSlots = 4;
+constexpr uint8_t kMicrophoneSlot = 0;
 // The ES8311 volume for 1% and for 100% sound volume, tuned for the board's speaker.
 constexpr int kAudioMinimumCodecVolume = 68;
 constexpr int kAudioMaximumCodecVolume = 82;
+constexpr bool kHasSpeaker = true;
+constexpr bool kHasMicrophone = true;
+constexpr unsigned kSerialBaud = 115200;
 
 // Touch, IMU, and audio codec share one I2C bus (Arduino Wire, I2C port 0).
 constexpr unsigned kI2cPort = 0;

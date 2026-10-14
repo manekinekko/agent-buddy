@@ -49,6 +49,7 @@ desktop, with or without the device.
 - [AI credits and tokens](#ai-credits-and-tokens)
 - [Characters](#characters)
 - [Wi-Fi](#wi-fi)
+- [Voice](#voice)
 - [Update](#update)
 - [Command reference](#command-reference)
 - [Troubleshooting](#troubleshooting)
@@ -78,6 +79,9 @@ desktop, with or without the device.
   on the same network.
 - **Optional sound:** short local sound cues through the board's speaker connector,
   and the same cues from the desktop app when you turn them on.
+- **Local voice on capable boards:** hold the on-screen microphone to speak,
+  transcribe locally with Whisper.cpp, ask a dedicated GitHub Copilot CLI
+  session, and play the answer through the device speaker.
 
 ## How it works
 
@@ -738,6 +742,37 @@ mode** on the settings page's **Device** tab, or with `npm run connection auto|w
 - Bluetooth isn't supported.
 
 </details>
+
+## Voice
+
+Voice appears only when the connected board advertises a microphone or speaker.
+On boards with a microphone, hold the large microphone button at the
+bottom-center of the display, speak, then release it. The button is red while
+recording, purple while the daemon processes the turn, and blue during
+playback. Drag outside the button to cancel.
+
+The current local voice service is supported on macOS. It uses Whisper.cpp for
+speech to text, GitHub Copilot CLI for the answer, macOS `say` for speech, and
+ffmpeg to produce the device's PCM format. Install the local tools and model:
+
+```bash
+brew install whisper-cpp ffmpeg
+mkdir -p "$HOME/Library/Application Support/ESP32 Agent Companion/voice/models"
+curl -fL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin \
+  -o "$HOME/Library/Application Support/ESP32 Agent Companion/voice/models/ggml-base.bin"
+npm run settings
+```
+
+Open the **Voice** tab, check that every dependency reports **Ready**, choose
+the TTS voice and rate, then use **Test speaker**. Recording is limited to 15
+seconds and generated playback to 45 seconds. Each voice conversation uses its
+own persisted Copilot CLI session, not the chat currently open in the Copilot
+app.
+
+Voice enables Copilot CLI's `--allow-all-tools` mode so spoken requests can run
+commands and change files without another approval prompt. Enable it only when
+that behavior is acceptable. USB audio stays on the cable. Wi-Fi audio uses an
+authenticated but unencrypted HTTP connection on the local network.
 
 ## Update
 

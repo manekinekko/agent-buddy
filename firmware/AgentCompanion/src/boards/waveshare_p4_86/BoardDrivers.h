@@ -1,7 +1,7 @@
 #pragma once
 // Device-only drivers for the Waveshare ESP32-P4 86-panel assembly (see BoardConfig.h).
 #include "BoardConfig.h"
-#include "../drivers/Es8311AudioOutput.h"
+#include "../drivers/Es8311Es7210Audio.h"
 #include "../drivers/FixedOrientationAccelerometer.h"
 #include "../drivers/Gt911TouchController.h"
 #include <Arduino_GFX_Library.h>
@@ -41,11 +41,12 @@ inline FixedOrientationAccelerometer& accelerometer() {
   return sensor;
 }
 
-inline Es8311AudioOutput& audioOutput() {
-  static Es8311AudioOutput output({kAudioMclkPin, kAudioBclkPin, kAudioWordSelectPin,
-                                   kAudioDataOutPin, kAudioAmplifierPin, kI2cPort,
-                                   kAudioCodecI2cAddress, kAudioMinimumCodecVolume,
-                                   kAudioMaximumCodecVolume});
+inline Es8311Es7210Audio& audioOutput() {
+  static Es8311Es7210Audio output({
+      kAudioMclkPin, kAudioBclkPin, kAudioWordSelectPin, kAudioDataOutPin,
+      kAudioDataInPin, kAudioAmplifierPin, kI2cPort, kAudioCodecI2cAddress,
+      kMicrophoneCodecI2cAddress, kAudioMinimumCodecVolume, kAudioMaximumCodecVolume,
+      kMicrophoneGain, kMicrophoneSlots, kMicrophoneSlot});
   return output;
 }
 }  // namespace board

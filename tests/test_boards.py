@@ -85,6 +85,7 @@ class BoardTargetTests(unittest.TestCase):
             lambda d: d["boards"][board_id].pop("flash"),
             lambda d: d["boards"][board_id].update(partitions=7),
             lambda d: d["boards"][board_id].update(flash_size=32),
+            lambda d: d["boards"][board_id].update(serial_baud=0),
             lambda d: d["boards"][board_id].update(directory=["not", "a", "folder"]),
             lambda d: d["boards"][board_id]["vendor"].pop("revision"),
             lambda d: d["boards"].update({"Bad_ID": d["boards"][board_id]}),
@@ -99,6 +100,7 @@ class BoardTargetTests(unittest.TestCase):
 
     def test_cli_reports_fields_and_unknown_boards(self):
         self.assertEqual(boards.main(["field", "id"]), 0)
+        self.assertEqual(boards.main(["field", "serial_baud"]), 0)
         self.assertEqual(boards.main(["field", "fqbn", "--board", "no-such-board"]), 1)
 
     def test_vendor_revision_is_pinned(self):

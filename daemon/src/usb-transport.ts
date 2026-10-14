@@ -24,10 +24,21 @@ import {
   wifiProvisioningPacket,
   type WifiConfig,
 } from './wifi-config.js';
+import {
+  parseUsbCapabilities,
+  parseVoiceCaptureReady,
+  parseVoicePcmHeader,
+  parseVoicePlaybackReady,
+  voicePlaybackSampleRate,
+  voiceProtocol,
+  type DeviceCapabilities,
+  type VoiceCapture,
+  type VoiceCaptureHeader,
+} from './voice-audio.js';
 
 const networkRefreshMs = 5000;
 // The newest firmware protocol this daemon knows; see kDeviceProtocol in DeviceCommands.h.
-const maxProtocol = 12;
+const maxProtocol = 13;
 // Requests in a row without an answer before the port counts as dead. A device that restarts
 // can leave the old port open but silent; closing it lets discovery or Wi-Fi take over.
 const deadLinkTimeouts = 3;
@@ -38,6 +49,7 @@ export type SerialPortClass = typeof SerialPort | typeof SerialPortMock;
 export interface UsbTransportOptions {
   serial?: SerialPortClass;
   requestTimeoutMs?: number;
+  voiceCaptureReady?: () => void;
 }
 
 class AcknowledgementTimeout extends Error {
@@ -49,6 +61,15 @@ class AcknowledgementTimeout extends Error {
 interface LineWaiter {
   match: (line: string) => boolean;
   resolve: (line: string) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+interface VoiceBinaryWaiter {
+  header: VoiceCaptureHeader | null;
+  chunks: Buffer[];
+  remaining: number;
+  resolve: (capture: VoiceCapture) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 }
@@ -66,8 +87,9 @@ export class UsbTransport {
   #networkTimer: NodeJS.Timeout | undefined;
   #scanActive = false;
   #networkRefreshActive = false;
-  #buffer = '';
+  #buffer = Buffer.alloc(0);
   #waiters: LineWaiter[] = [];
+  #voiceBinary: VoiceBinaryWaiter | null = null;
   #commands = Promise.resolve();
   #protocol = 0;
   #iconSignature = '';
@@ -80,6 +102,8 @@ export class UsbTransport {
   #firmware: string | null = null;
   #network: DeviceNetwork | null = null;
   #orientation: DeviceOrientation | null = null;
+  #capabilities: DeviceCapabilities = {speaker: false, microphone: false};
+  #lastVoiceCaptureId = 0;
   // The ESP32 port the last scan chose, and how many handshakes in a row it failed.
   #seen: UsbPort | null = null;
   #failures = 0;
@@ -88,6 +112,7 @@ export class UsbTransport {
   readonly #requestTimeoutMs: number;
   readonly #changed: () => void;
   readonly #button: (presses: number) => void;
+  readonly #voiceCaptureReady: () => void;
 
   // `button` runs when the device's BOOT button is pressed, with the count since the device started.
   constructor(changed: () => void = () => undefined, button: (presses: number) => void = () => undefined,
@@ -96,6 +121,7 @@ export class UsbTransport {
     this.#button = button;
     this.#serial = options.serial ?? SerialPort;
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 5000;
+    this.#voiceCaptureReady = options.voiceCaptureReady ?? (() => undefined);
   }
 
   get character(): string | null {
@@ -118,6 +144,10 @@ export class UsbTransport {
 
   get orientation(): DeviceOrientation | null {
     return this.connected ? this.#orientation : null;
+  }
+
+  get capabilities(): DeviceCapabilities {
+    return this.connected ? this.#capabilities : {speaker: false, microphone: false};
   }
 
   get connected(): boolean {
@@ -185,11 +215,14 @@ export class UsbTransport {
     this.#scanTimer = undefined;
     this.#networkTimer = undefined;
     this.#rejectWaiters(new Error('USB transport stopped.'));
+    this.#rejectVoiceBinary(new Error('USB transport stopped.'));
     const port = this.#port;
     this.#port = undefined;
     this.#path = null;
     this.#answered = false;
     this.#orientation = null;
+    this.#capabilities = {speaker: false, microphone: false};
+    this.#buffer = Buffer.alloc(0);
     if (port?.isOpen) {
       await new Promise<void>(resolve => port.close(() => resolve()));
     }
@@ -268,7 +301,8 @@ export class UsbTransport {
   async #open(path: string): Promise<void> {
     const port = new this.#serial({
       path,
-      baudRate: 115200,
+      baudRate: Number(process.env.AGENT_COMPANION_BAUD)
+        || (/wchusbserial/i.test(path) ? 921600 : 115200),
       autoOpen: false,
       hupcl: false,
     });
@@ -277,6 +311,7 @@ export class UsbTransport {
     port.on('close', () => {
       console.log(`[usb] disconnected ${path}`);
       this.#rejectWaiters(new Error('USB device disconnected.'));
+      this.#rejectVoiceBinary(new Error('USB device disconnected.'));
       if (this.#port === port) {
         const wasConnected = this.#answered;
         this.#port = undefined;
@@ -384,6 +419,117 @@ export class UsbTransport {
     return operation;
   }
 
+  captureVoice(): Promise<VoiceCapture> {
+    const operation = this.#commands.then(() => this.#captureVoice());
+    this.#commands = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async #captureVoice(): Promise<VoiceCapture> {
+    if (!this.connected) throw new Error('Connect the Agent Companion first.');
+    if (this.#protocol < voiceProtocol || !this.#capabilities.microphone)
+      throw new Error('The connected device does not support microphone capture.');
+    this.#rejectVoiceBinary(new Error('A newer voice capture request replaced the previous request.'));
+    const binary = new Promise<VoiceCapture>((resolve, reject) => {
+      const waiter: VoiceBinaryWaiter = {
+        header: null,
+        chunks: [],
+        remaining: 0,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (this.#voiceBinary === waiter) this.#voiceBinary = null;
+          reject(new Error('Timed out receiving microphone audio from the device.'));
+        }, 60_000),
+      };
+      this.#voiceBinary = waiter;
+    });
+    try {
+      const [line, capture] = await Promise.all([
+        this.#request('v', candidate => candidate.startsWith('VOICE_PCM ')
+          || candidate.startsWith('VOICE_ERROR '), 10_000),
+        binary,
+      ]);
+      if (line.startsWith('VOICE_ERROR '))
+        throw new Error(`Device microphone capture failed: ${line.slice('VOICE_ERROR '.length)}`);
+      return capture;
+    } catch (error) {
+      this.#rejectVoiceBinary(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+
+  playVoice(
+      pcm: Buffer, sampleRate = voicePlaybackSampleRate, signal?: AbortSignal): Promise<void> {
+    const operation = this.#commands.then(() => this.#playVoice(pcm, sampleRate, signal));
+    this.#commands = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async #playVoice(pcm: Buffer, sampleRate: number, signal?: AbortSignal): Promise<void> {
+    if (!this.connected) throw new Error('Connect the Agent Companion first.');
+    if (this.#protocol < voiceProtocol || !this.#capabilities.speaker)
+      throw new Error('The connected device does not support speaker playback.');
+    if (sampleRate !== voicePlaybackSampleRate || pcm.length === 0 || pcm.length % 2)
+      throw new Error(`Voice playback must be non-empty ${voicePlaybackSampleRate} Hz mono signed 16-bit PCM.`);
+    const readyLine = await this.#request(
+      `~${sampleRate}:${pcm.length}\n`,
+      line => line.startsWith('VOICE_PLAY_READY ') || line.startsWith('VOICE_ERROR '), 10_000);
+    if (readyLine.startsWith('VOICE_ERROR '))
+      throw new Error(`Device speaker playback failed: ${readyLine.slice('VOICE_ERROR '.length)}`);
+    const limits = parseVoicePlaybackReady(readyLine);
+    if (!limits || limits.bytes !== pcm.length || limits.sampleRate !== sampleRate)
+      throw new Error(`Device sent an invalid voice playback response: ${readyLine}`);
+    let cancelled = signal?.aborted === true;
+    let completion: Promise<string> | null = null;
+    for (let sent = 0; sent < pcm.length; sent += limits.chunk) {
+      const chunk = pcm.subarray(sent, sent + limits.chunk);
+      const final = sent + chunk.length === pcm.length;
+      if (final) {
+        const durationMs = Math.ceil(pcm.length / 2 / sampleRate * 1000);
+        completion = this.#waitFor(line => line === 'VOICE_PLAYBACK_END'
+          || line.startsWith('VOICE_ERROR playback='), durationMs + 15_000);
+      }
+      const response = await this.#request(chunk, line => line.startsWith('VOICE_ERROR ')
+        || (final ? line.startsWith('VOICE_PLAY_QUEUED ') : line.startsWith('VOICE_PLAY_ACK ')),
+      15_000);
+      if (response.startsWith('VOICE_ERROR '))
+        throw new Error(`Device speaker playback failed: ${response.slice('VOICE_ERROR '.length)}`);
+      const received = Number(/\breceived=(\d+)\b/.exec(response)?.[1]);
+      if (!final && received !== sent + chunk.length)
+        throw new Error(`Device acknowledged an unexpected voice byte count: ${response}`);
+      if (signal?.aborted) cancelled = true;
+    }
+    if (!completion) throw new Error('Device did not queue voice playback.');
+    const onAbort = () => {
+      cancelled = true;
+      void this.#write('x').catch(() => undefined);
+    };
+    signal?.addEventListener('abort', onAbort, {once: true});
+    if (cancelled) await this.#write('x');
+    try {
+      const ended = await completion;
+      if (ended.startsWith('VOICE_ERROR playback='))
+        throw new Error(`Device speaker playback failed: ${ended.slice('VOICE_ERROR '.length)}`);
+      if (cancelled) throw new Error('Voice playback was canceled.');
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+    }
+  }
+
+  cancelVoice(): Promise<void> {
+    const operation = this.#commands.then(async () => {
+      if (!this.connected || this.#protocol < voiceProtocol) return;
+      const line = await this.#request(
+        'x', candidate => candidate === 'VOICE_CANCELLED'
+          || candidate.startsWith('VOICE_ERROR cancel='), 5000);
+      if (line.startsWith('VOICE_ERROR cancel=') && !line.endsWith('nothing-active'))
+        throw new Error(`Device could not cancel voice audio: ${line}`);
+    });
+    this.#commands = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   async #readOrientation(): Promise<void> {
     if (this.#protocol < orientationProtocol) {
       this.#orientation = null;
@@ -423,6 +569,8 @@ export class UsbTransport {
     this.#protocol = protocol;
     if (protocol < orientationProtocol) this.#orientation = null;
     this.#adaptivePatchRam = /\bpatch_ram=adaptive\b/.test(info);
+    this.#capabilities = protocol >= voiceProtocol
+      ? parseUsbCapabilities(info) : {speaker: false, microphone: false};
     this.#firmware = /\bfirmware=([0-9a-f]{16})\b/.exec(info)?.[1] ?? null;
     this.#network = deviceNetwork(/\bssid_b64=([A-Za-z0-9+/=]*)/.exec(info)?.[1],
                                   /\bwifi_connected=1\b/.test(info));
@@ -550,32 +698,78 @@ export class UsbTransport {
   }
 
   #onData(data: Buffer): void {
-    this.#buffer += data.toString('utf8');
-    if (this.#buffer.length > 65536) {
+    this.#buffer = Buffer.concat([this.#buffer, data]);
+    if (!this.#voiceBinary && this.#buffer.length > 65536) {
       console.error('[usb] discarded oversized unterminated serial response');
-      this.#buffer = '';
+      this.#buffer = Buffer.alloc(0);
       this.#rejectWaiters(new Error('USB device returned an oversized response.'));
       return;
     }
-    for (;;) {
-      const newline = this.#buffer.indexOf('\n');
-      if (newline < 0) break;
-      const line = this.#buffer.slice(0, newline).trim();
-      this.#buffer = this.#buffer.slice(newline + 1);
-      if (!line) continue;
-      // Software restarts keep the USB port open, so the boot banner marks a new session.
-      if (line.startsWith('READY:')) this.#rebooted(line);
-      const presses = parseButtonLine(line);
-      if (presses !== null) {
-        this.#button(presses);
+    while (this.#buffer.length) {
+      const binary = this.#voiceBinary;
+      if (binary?.header && binary.remaining > 0) {
+        const length = Math.min(binary.remaining, this.#buffer.length);
+        binary.chunks.push(this.#buffer.subarray(0, length));
+        binary.remaining -= length;
+        this.#buffer = this.#buffer.subarray(length);
+        if (binary.remaining > 0) return;
         continue;
       }
-      const waiter = this.#waiters.find(candidate => candidate.match(line));
-      if (!waiter) continue;
-      clearTimeout(waiter.timer);
-      this.#waiters.splice(this.#waiters.indexOf(waiter), 1);
-      waiter.resolve(line);
+      const newline = this.#buffer.indexOf(0x0A);
+      if (newline < 0) return;
+      const lineBytes = this.#buffer.subarray(0, newline);
+      this.#buffer = this.#buffer.subarray(newline + 1);
+      const end = lineBytes.length && lineBytes[lineBytes.length - 1] === 0x0D
+        ? lineBytes.length - 1 : lineBytes.length;
+      const line = lineBytes.subarray(0, end).toString('utf8').trim();
+      if (line) this.#handleLine(line);
     }
+  }
+
+  #handleLine(line: string): void {
+    if (line.startsWith('VOICE_PLAYBACK_RESUME ')
+        || line.startsWith('VOICE_CAPTURE_DONE ')
+        || line.startsWith('VOICE_TOUCH '))
+      console.log(`[usb] ${line}`);
+    if (line.startsWith('VOICE_PCM ')) {
+      const header = parseVoicePcmHeader(line);
+      if (!header || !this.#voiceBinary) {
+        this.#rejectVoiceBinary(new Error(`Device sent an unexpected voice capture header: ${line}`));
+      } else {
+        this.#voiceBinary.header = header;
+        this.#voiceBinary.remaining = header.bytes;
+      }
+    } else if (line.startsWith('VOICE_PCM_END ')) {
+      const id = Number(/^VOICE_PCM_END id=(\d+)$/.exec(line)?.[1]);
+      const capture = this.#voiceBinary;
+      if (!capture?.header || capture.remaining !== 0 || id !== capture.header.id) {
+        this.#rejectVoiceBinary(new Error(`Device sent an invalid voice capture trailer: ${line}`));
+      } else {
+        this.#voiceBinary = null;
+        clearTimeout(capture.timer);
+        capture.resolve({
+          pcm: Buffer.concat(capture.chunks, capture.header.bytes),
+          sampleRate: capture.header.sampleRate,
+        });
+      }
+    } else if (line.startsWith('VOICE_ERROR ')) {
+      this.#rejectVoiceBinary(
+        new Error(`Device microphone capture failed: ${line.slice('VOICE_ERROR '.length)}`));
+    }
+
+    if (line.startsWith('READY:')) this.#rebooted(line);
+    const presses = parseButtonLine(line);
+    if (presses !== null) this.#button(presses);
+    const ready = parseVoiceCaptureReady(line);
+    if (ready && ready.id !== this.#lastVoiceCaptureId) {
+      this.#lastVoiceCaptureId = ready.id;
+      this.#voiceCaptureReady();
+    }
+    const waiter = this.#waiters.find(candidate => candidate.match(line));
+    if (!waiter) return;
+    clearTimeout(waiter.timer);
+    this.#waiters.splice(this.#waiters.indexOf(waiter), 1);
+    waiter.resolve(line);
   }
 
   #rebooted(line: string): void {
@@ -608,6 +802,14 @@ export class UsbTransport {
       clearTimeout(waiter.timer);
       waiter.reject(error);
     }
+  }
+
+  #rejectVoiceBinary(error: Error): void {
+    const capture = this.#voiceBinary;
+    if (!capture) return;
+    this.#voiceBinary = null;
+    clearTimeout(capture.timer);
+    capture.reject(error);
   }
 
   #message(error: unknown): string {

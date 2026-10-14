@@ -6,9 +6,41 @@ namespace copilot {
 enum class DeviceCommand {
   None, Invalid, Capture, Heap, Info, UploadCharacter, ConfigureWifi, ScanWifi,
   DefineAgentIcon, SetAgentBadges, SetUsage, GetOrientation, ConfigureOrientation,
+  ReadVoiceCapture, UploadVoice, CancelVoice,
   Idle, Surprise, Working, Complete, Attention
 };
-constexpr unsigned kDeviceProtocol = 12;
+constexpr unsigned kDeviceProtocol = 13;
+
+struct VoicePlaybackPacket {
+  unsigned sampleRate = 0;
+  uint32_t bytes = 0;
+};
+
+inline bool parseVoicePlaybackPacket(const char* text, VoicePlaybackPacket& packet) {
+  if (!text || !*text) return false;
+  uint64_t values[2] = {};
+  unsigned part = 0;
+  unsigned digits = 0;
+  for (const char* cursor = text;; ++cursor) {
+    const char byte = *cursor;
+    if (byte >= '0' && byte <= '9') {
+      values[part] = values[part] * 10 + static_cast<unsigned>(byte - '0');
+      if (values[part] > UINT32_MAX) return false;
+      ++digits;
+      continue;
+    }
+    if (byte == ':' && part == 0 && digits) {
+      part = 1;
+      digits = 0;
+      continue;
+    }
+    if (byte == '\0' && part == 1 && digits) break;
+    return false;
+  }
+  if (values[0] == 0 || values[1] == 0) return false;
+  packet = {static_cast<unsigned>(values[0]), static_cast<uint32_t>(values[1])};
+  return true;
+}
 
 inline const char* commandName(DeviceCommand command) {
   switch (command) {
@@ -82,6 +114,8 @@ class DeviceCommands {
       allowed = alphaNum || byte == ' ' || byte == ',' || byte == '.' || byte == ':' || byte == '|';
     else if (packet_ == Packet::Orientation)
       allowed = (byte >= '0' && byte <= '9') || byte == '-';
+    else if (packet_ == Packet::Voice)
+      allowed = (byte >= '0' && byte <= '9') || byte == ':';
     if (invalid_ || length_ == sizeof(text_) - 1 || !allowed) invalid_ = true;
     else text_[length_++] = byte;
     return DeviceCommand::None;
@@ -96,7 +130,7 @@ class DeviceCommands {
   const char* payload() const { return text_; }
 
  private:
-  enum class Packet : uint8_t { Mode, Wifi, Icon, Agents, Usage, Orientation };
+  enum class Packet : uint8_t { Mode, Wifi, Icon, Agents, Usage, Orientation, Voice };
   // A packet starts with its prefix and ends at '\n'; a mode packet ends with a mode name.
   struct PacketStart {
     char prefix;
@@ -110,6 +144,7 @@ class DeviceCommands {
     {'&', Packet::Agents, DeviceCommand::SetAgentBadges},
     {'$', Packet::Usage, DeviceCommand::SetUsage},
     {'^', Packet::Orientation, DeviceCommand::ConfigureOrientation},
+    {'~', Packet::Voice, DeviceCommand::UploadVoice},
   };
   struct ByteCommand {
     char byte;
@@ -119,6 +154,7 @@ class DeviceCommands {
     {'o', DeviceCommand::GetOrientation}, {'s', DeviceCommand::Capture},
     {'h', DeviceCommand::Heap}, {'i', DeviceCommand::Info},
     {'u', DeviceCommand::UploadCharacter}, {'w', DeviceCommand::ScanWifi},
+    {'v', DeviceCommand::ReadVoiceCapture}, {'x', DeviceCommand::CancelVoice},
   };
   char text_[192] = {};
   unsigned length_ = 0;
